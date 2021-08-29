@@ -1,7 +1,6 @@
 
 import tensorflow as tf
 
-
 class sde(tf.keras.Model):
     """pathwise derivative implementation of nonlinear SDE using Euler-Maruyama discretization"""
     def __init__(self, dim, pastlen=1):
@@ -25,9 +24,10 @@ class sde(tf.keras.Model):
     def obj(self, init_state, ntimesteps, yhat):
         """Calculates objective value.
         Inputs:
-            init_state: see self.solve
-            ntimesteps: see self.solve
-            yhat: target in shape of (ntimesteps, batch size, dimension)
+            init_state: list of tensors, each tensor has shape (batch size, dimension). pastlen tensors total.
+                init_state are the initial conditions for SDE
+            ntimesteps: integer number of timesteps
+            yhat: target. list of tensors, in shape of (ntimesteps, batch size, dimension)
         Returns:
             objective value calculated from self.loss
         """
@@ -40,9 +40,11 @@ class sde(tf.keras.Model):
         return obj[-1]
 
     def grad(self, init_state, ntimesteps, yhat, return_obj=True):
-        """Calculates objective value and gradient"""
+        """Calculates objective value and gradient."""
         # this version does not use gradient tape on forward pass; this prevents storing activations in
         # memory. The trade off is the equivalent of an extra forward pass in the reverse pass.
+
+        # batch_size = tf.shape(init_state)[1]
 
         # forward pass
         self.solve(init_state, ntimesteps)
@@ -54,11 +56,36 @@ class sde(tf.keras.Model):
 
         # reverse pass
         pastlen = self.pastlen
-        lam = [tf.zeros(())]
+        lam = [0 for i in range(pastlen+1)]  # initialize lambda
+        # lam[-1] stores the current adjoint variable; lam[:-1] accumulates terms from pastlen
+        lam[-1] = 2*(self.mem[-1] - yhat[-1])
+        ghat = [0 for i in range(len(self.trainable_variables))] # gradient
         for i in reversed(range(ntimesteps)):
+            # grab x_{i-1}, z_i
+            xim1 = self.mem[i:i+pastlen]  # read as x_{i-1}
+            zi = self.zmem[i]
+            # calculate vector jacobian products
+            with tf.GradientTape() as g:
+                g.watch(xim1)
+                temp = self.step(xim1, zi)
+            vjp = g.gradient(temp, [xim1, self.trainable_variables], output_gradients=lam[-1])
             dfdx = 2*(self.mem[i+pastlen] - yhat[i])  # read as \dfrac{\partial f}{\partial x}
 
+            # update gradient
+            for j in range(len(ghat)):
+                ghat[j] = ghat[j] + vjp[1][j]
+            # update adjoint variables
+            if i > 0:
+                lam.pop(-1)
+                for j in range(pastlen):
+                    lam[j] += vjp[0][j]
+                lam[-1] += dfdx
+                lam.insert(0, 0)
 
+        if return_obj:
+            return obj[-1], ghat
+        else:
+            return ghat
 
     @tf.function
     def loss(self, y, yhat):
@@ -78,12 +105,12 @@ class sde(tf.keras.Model):
         drift = self.drift_dense1(curstate)
         drift = self.drift_dense2(drift)
         drift = self.drift_output(drift)
-        tf.assert_equal(tf.shape(drift), (batch_size, self.dim))
+        # tf.assert_equal(tf.shape(drift), (batch_size, self.dim))
 
         diff = self.diff_dense1(curstate)
         diff = self.diff_dense2(diff)
         diff = self.diff_output(diff)
-        tf.assert_equal(tf.shape(diff), (batch_size, self.dim*self.dim))
+        # tf.assert_equal(tf.shape(diff), (batch_size, self.dim*self.dim))
 
         return last_curstate + drift + tf.squeeze(
             tf.matmul(tf.reshape(diff, (batch_size, self.dim, self.dim)),z),axis=-1)
@@ -117,7 +144,11 @@ test = sde(10, pastlen=3)
 
 init_state = [tf.random.normal((1, test.dim)) for i in range(test.pastlen)]
 
-test.solve(init_state, 100)
+test.solve(init_state, 30)
+
+yhat = [tf.ones((1, test.dim)) for i in range(30)]
+
+out = test.grad(init_state, 30, yhat)
 #%%
 z = tf.random.normal((test.dim,1))
 a = test.step(init_state, z)
