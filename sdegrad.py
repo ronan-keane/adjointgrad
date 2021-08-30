@@ -6,7 +6,10 @@ class sde(tf.keras.Model):
     """pathwise derivative implementation of nonlinear SDE using Euler-Maruyama discretization"""
     def __init__(self, dim, pastlen=1):
         """
-            dim: dimension of SDE
+            dim: dimension of SDE. Does not include any dimensions corresponding to periodic inputs.
+                e.g. Dimension is 10, problem has periodicity in days, so there are 2 extra dimensions
+                corresponding to this periodicity. We predict 10 values every timestep, then add the 2
+                extra time dimensions. self.dim = 10, but there are 12 entries in each prediction.
             pastlen: number of past timesteps used to calculate drift/diffusion (1 uses current timestep only)
         """
         super().__init__()
@@ -68,7 +71,7 @@ class sde(tf.keras.Model):
             # calculate vector jacobian products
             with tf.GradientTape() as g:
                 g.watch(xim1)
-                temp = self.step(xim1, zi, start+i)
+                temp = self.step(xim1, zi, tf.convert_to_tensor(start+i, dtype=tf.float32))
             vjp = g.gradient(temp, [xim1, self.trainable_variables], output_gradients=lam[-1])
             dfdx = 2*(self.mem[i+pastlen] - yhat[i])  # read as \dfrac{\partial f}{\partial x}
 
@@ -104,10 +107,10 @@ class sde(tf.keras.Model):
             z: shape (batch size, dimension, 1) where each entry is normally distributed
             t: time index of prediction
         """
-        batch_size = tf.shape(curstate)[1]
-        last_curstate = curstate[-1]  # most recent measurements
+        batch_size, dim_maybe_with_t = tf.shape(curstate)[1], tf.shape(curstate)[2]
+        last_curstate = curstate[-1][:,:self.dim]  # most recent measurements
         curstate = tf.transpose(curstate, [1,0,2])
-        curstate = tf.reshape(curstate, (batch_size, self.dim*self.pastlen))
+        curstate = tf.reshape(curstate, (batch_size, dim_maybe_with_t*self.pastlen))
 
         drift = self.drift_dense1(curstate)
         drift = self.drift_dense2(drift)
@@ -121,7 +124,7 @@ class sde(tf.keras.Model):
         # tf.assert_equal(tf.shape(diff), (batch_size, self.dim*self.dim))
 
         return self.add_periodic_input_to_curstate(
-            last_curstate + drift + tf.squeeze(tf.matmul(tfp.fill_triangular(diff),z),axis=-1), t)
+            last_curstate + drift + tf.squeeze(tf.matmul(tfp.math.fill_triangular(diff),z),axis=-1), t)
 
     @tf.function
     def add_periodic_input_to_curstate(self, curstate, t):
@@ -145,7 +148,7 @@ class sde(tf.keras.Model):
 
         for i in range(ntimesteps):
             z = tf.random.normal((batch_size, self.dim, 1))
-            nextstate = self.step(self.curstate, z, start+i)  # call to model
+            nextstate = self.step(self.curstate, z, tf.convert_to_tensor(start+i, dtype=tf.float32))  # call to model
 
             self.mem.append(nextstate)
             self.zmem.append(z)

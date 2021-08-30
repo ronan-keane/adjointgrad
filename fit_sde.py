@@ -34,8 +34,8 @@ train = np.concatenate([train, periods[:split_ind]], axis=1)
 test = np.concatenate([test, periods[split_ind:]], axis=1)
 
 # convert to tensor
-train = tf.convert_to_tensor(train)
-test = tf.convert_to_tensor(test)
+train = tf.convert_to_tensor(train, dtype=tf.float32)
+test = tf.convert_to_tensor(test, dtype=tf.float32)
 
 #%% make model and optimizer
 
@@ -48,7 +48,7 @@ class mysde(sde):
         yearperiod = t/(24*4*365)*2*3.1415926535
         temp = tf.tile(tf.expand_dims(tf.stack([tf.math.sin(dayperiod), tf.math.cos(dayperiod),
             tf.math.sin(yearperiod), tf.math.cos(yearperiod)]),0),[batch_size,1])
-        return tf.concat([curstate, temp],0)
+        return tf.concat([curstate, temp],1)
 
 
 model = mysde(20, pastlen=12)
@@ -60,7 +60,7 @@ prediction_length = 12
 nbatches = int(len(train)/prediction_length)*10
 
 for i in range(nbatches):
-    ind = int(np.random.rand()*(len(train)-model.pastlen))+model.pastlen  # index of first prediction
+    ind = int(np.random.rand()*(len(train)-model.pastlen-prediction_length))+model.pastlen  # index of first prediction
     curdata = [tf.tile(train[j+ind-model.pastlen:j+ind-model.pastlen+1,:], [batch_size, 1]) for j in range(prediction_length+model.pastlen)]
 
     init_state = curdata[:model.pastlen]
