@@ -16,13 +16,14 @@ class sde(tf.keras.Model):
         # drift architecture
         self.drift_dense1 = tf.keras.layers.Dense(128, activation='relu')
         self.drift_dense2 = tf.keras.layers.Dense(128, activation='relu')
+        self.drift_dense3 = tf.keras.layers.Dense(128, activation='relu')
         self.drift_output = tf.keras.layers.Dense(dim, activation=None)
         # diffusion architecture
         self.diff_dense1 = tf.keras.layers.Dense(128, activation='relu')
         self.diff_dense2 = tf.keras.layers.Dense(128, activation='relu')
         self.diff_output = tf.keras.layers.Dense(int(dim*(dim+1)/2), activation=None)
 
-    def obj(self, init_state, ntimesteps, yhat):
+    def obj(self, init_state, ntimesteps, yhat, start=0):
         """Calculates objective value.
         Inputs:
             init_state: list of tensors, each tensor has shape (batch size, dimension), list has shape
@@ -32,7 +33,7 @@ class sde(tf.keras.Model):
         Returns:
             objective value calculated from self.loss
         """
-        self.solve(init_state, ntimesteps)
+        self.solve(init_state, ntimesteps, start=start)
         obj = [None for i in range(ntimesteps)]
         curobj = 0
         for i in reversed(range(ntimesteps)):
@@ -40,13 +41,13 @@ class sde(tf.keras.Model):
             obj[i] = curobj
         return obj[-1]
 
-    def grad(self, init_state, ntimesteps, yhat, return_obj=True):
+    def grad(self, init_state, ntimesteps, yhat, start=0, return_obj=True):
         """Calculates objective value and gradient."""
         # this version does not use gradient tape on forward pass; this prevents storing activations in
         # memory. The trade off is the equivalent of an extra forward pass in the reverse pass.
 
         # forward pass
-        self.solve(init_state, ntimesteps)
+        self.solve(init_state, ntimesteps, start=start)
         obj = [None for i in range(ntimesteps)]
         curobj = 0
         for i in reversed(range(ntimesteps)):
@@ -67,7 +68,7 @@ class sde(tf.keras.Model):
             # calculate vector jacobian products
             with tf.GradientTape() as g:
                 g.watch(xim1)
-                temp = self.step(xim1, zi)
+                temp = self.step(xim1, zi, start+i)
             vjp = g.gradient(temp, [xim1, self.trainable_variables], output_gradients=lam[-1])
             dfdx = 2*(self.mem[i+pastlen] - yhat[i])  # read as \dfrac{\partial f}{\partial x}
 
@@ -97,10 +98,11 @@ class sde(tf.keras.Model):
         return tf.math.reduce_mean(tf.math.square(y - yhat))
 
     @tf.function
-    def step(self, curstate, z):
+    def step(self, curstate, z, t):
         """
-            curstate: shape (pastlen, batch size, dimension) of the current measurements + history
+            curstate: shape (pastlen, batch size, dimension). current measurements + history
             z: shape (batch size, dimension, 1) where each entry is normally distributed
+            t: time index of prediction
         """
         batch_size = tf.shape(curstate)[1]
         last_curstate = curstate[-1]  # most recent measurements
@@ -109,6 +111,7 @@ class sde(tf.keras.Model):
 
         drift = self.drift_dense1(curstate)
         drift = self.drift_dense2(drift)
+        drift = self.drift_dense3(drift)
         drift = self.drift_output(drift)
         # tf.assert_equal(tf.shape(drift), (batch_size, self.dim))
 
@@ -117,15 +120,22 @@ class sde(tf.keras.Model):
         diff = self.diff_output(diff)
         # tf.assert_equal(tf.shape(diff), (batch_size, self.dim*self.dim))
 
-        return last_curstate + drift + tf.squeeze(tf.matmul(tfp.fill_triangular(diff),z),axis=-1)
+        return self.add_periodic_input_to_curstate(
+            last_curstate + drift + tf.squeeze(tf.matmul(tfp.fill_triangular(diff),z),axis=-1), t)
 
-    def solve(self, init_state, ntimesteps):
+    @tf.function
+    def add_periodic_input_to_curstate(self, curstate, t):
+        """Curstate has shape (batch size, self.dim). t is current time index. Add time to curstate."""
+        return curstate
+
+    def solve(self, init_state, ntimesteps, start=0):
         """
             init_state: length pastlen list of tensors, each tensor has shape (batch size, dimension)
                 init_state are the initial conditions for SDE
             ntimesteps: integer number of timesteps
+            start: time index of first prediction (init_state[-1]+1). Assumed same for entire batch.
         """
-        tf.assert_equal(tf.shape(init_state)[0::2], (self.pastlen, self.dim))
+        # tf.assert_equal(tf.shape(init_state)[0::2], (self.pastlen, self.dim))
         batch_size = tf.shape(init_state)[1]
         self.curstate = init_state
 
@@ -135,17 +145,10 @@ class sde(tf.keras.Model):
 
         for i in range(ntimesteps):
             z = tf.random.normal((batch_size, self.dim, 1))
-            nextstate = self.step(self.curstate, z)  # call to model
+            nextstate = self.step(self.curstate, z, start+i)  # call to model
 
             self.mem.append(nextstate)
             self.zmem.append(z)
 
             self.curstate = self.mem[-self.pastlen:]
-
-
-
-
-
-
-
 
