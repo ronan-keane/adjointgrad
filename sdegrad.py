@@ -59,14 +59,14 @@ class sde(tf.keras.Model):
             # calculate vector jacobian products
             with tf.GradientTape() as g:
                 g.watch(xim1)
-                xi_and_det = self.step(xim1, zi, tf.convert_to_tensor(start+i, dtype=tf.float32))
+                xi_and_extra = self.step(xim1, zi, tf.convert_to_tensor(start+i, dtype=tf.float32))
             with tf.GradientTape() as gg:
-                gg.watch(xi_and_det)
-                f = self.loss(xi_and_det, yhati, sample_weight=sample_weight)
-            dfdx = gg.gradient(f, xi_and_det)  # read as \dfrac{\partial f}{\partial x}
+                gg.watch(xi_and_extra)
+                f = self.loss(xi_and_extra, yhati, sample_weight=sample_weight)
+            dfdx = gg.gradient(f, xi_and_extra)  # read as \dfrac{\partial f}{\partial x}
             lam[-1][0] += dfdx[0]
             lam[-1][1] += dfdx[1]
-            vjp = g.gradient(xi_and_det, [xim1, self.trainable_variables], output_gradients=lam[-1])
+            vjp = g.gradient(xi_and_extra, [xim1, self.trainable_variables], output_gradients=lam[-1])
 
             # update gradient
             for j in range(len(ghat)):
@@ -77,11 +77,6 @@ class sde(tf.keras.Model):
                 for j in range(pastlen):
                     lam[j][0] += vjp[0][j]
                 lam.insert(0, [0,0])
-
-        # # rescale gradient by batch size
-        # batch_size = tf.cast(tf.shape(init_state)[1], tf.float32)
-        # for j in range(len(ghat)):
-        #     ghat[j] = ghat[j] / batch_size
 
         # add l2 regularization
         for j in range(len(ghat)):
@@ -99,6 +94,26 @@ class sde(tf.keras.Model):
         return self.loss_fn(yhat, y[0], sample_weight=sample_weight) - entropy*sample_weight*self.p
 
     @tf.function
+    def drift(self, curstate):
+        drift1 = self.drift_dense1(curstate)
+        drift = self.drift_dense2(drift1)
+        drift = self.drift_dense3(drift + drift1)
+        drift = tf.keras.activations.relu(drift)
+        return self.drift_output(drift)
+
+    @tf.function
+    def diffusion(self, curstate):
+        diff1 = self.diff_dense1(curstate)
+        diff = self.diff_dense2(diff1)
+        diff = self.diff_dense3(diff + diff1)
+        diff = tf.keras.activations.relu(diff)
+        diff = self.diff_output(diff)
+        diff = tfp.math.fill_triangular(diff)
+        # to enforce positive definitness, need to make diagonal positive
+        diag = tf.math.exp(tf.linalg.diag_part(diff))
+        return tf.linalg.set_diag(diff, diag)
+
+    @tf.function
     def step(self, curstate, z, t):
         """
         The equivalent of the h_i function.
@@ -111,25 +126,13 @@ class sde(tf.keras.Model):
         last_curstate = curstate[-1][:,:self.dim]  # most recent measurements
         curstate = tf.transpose(curstate, [1,0,2])
         curstate = tf.reshape(curstate, (batch_size, dim_maybe_with_t*self.pastlen))
-        # drift
-        drift1 = self.drift_dense1(curstate)
-        drift = self.drift_dense2(drift1)
-        drift = self.drift_dense3(drift + drift1)
-        drift = tf.keras.activations.relu(drift)
-        drift = self.drift_output(drift)
-        # diffusion
-        diff1 = self.diff_dense1(curstate)
-        diff = self.diff_dense2(diff1)
-        diff = self.diff_dense3(diff + diff1)
-        diff = tf.keras.activations.relu(diff)
-        diff = self.diff_output(diff)
-        diff = tfp.math.fill_triangular(diff)
-        # to enforce positive definitness, need to make diagonal positive
-        diag = tf.math.exp(tf.linalg.diag_part(diff))
-        diff = tf.linalg.set_diag(diff, diag)
-        diff_det = tf.math.reduce_prod(diag, axis=1)  # determinant
-        # diff_det = tf.ones((batch_size, self.dim))
 
+        # call to model architecture
+        drift = self.drift(curstate)
+        diff = self.diffusion(curstate)
+        
+        
+        diff_det = tf.math.reduce_prod(tf.linalg.diag_part(diff), axis=1)  # determinant
         out = self.add_periodic_input_to_curstate(
             last_curstate + drift + tf.squeeze(tf.matmul(diff,z),axis=-1), t)
 
@@ -177,3 +180,46 @@ class sde(tf.keras.Model):
             obj = tf.math.cumsum(obj, reverse=True)
         return obj
 
+class sde_mle(sde):
+    """Uses MLE loss instead of Huber loss + entropy maximization."""
+    @tf.function
+    def step(self, curstate, z, t):
+        """
+        The equivalent of the h_i function.
+            curstate: shape (pastlen, batch size, dimension). current measurements + history
+                (curstate is equivalent to x_{i-1})
+            z: shape (batch size, dimension, 1) where each entry is normally distributed
+            t: time index of prediction
+        """
+        batch_size, dim_maybe_with_t = tf.shape(curstate)[1], tf.shape(curstate)[2]
+        last_curstate = curstate[-1][:,:self.dim]  # most recent measurements
+        curstate = tf.transpose(curstate, [1,0,2])
+        curstate = tf.reshape(curstate, (batch_size, dim_maybe_with_t*self.pastlen))
+        
+        # call to model architecture
+        drift = self.drift(curstate)
+        diff = self.diffusion(curstate)
+        
+        mu = last_curstate + drift
+        out = self.add_periodic_input_to_curstate(
+            mu + tf.squeeze(tf.matmul(diff,z),axis=-1), t)
+        
+        return out, [mu, diff]
+    
+    @tf.function
+    def loss(self, y, yhat, sample_weight=None):
+        batch_size = tf.shape(yhat)[0]
+        yhat = yhat[:,:self.dim]
+        mu = y[1][0]
+        sigma_chol = y[1][1]
+        
+        det = tf.math.reduce_prod(tf.linalg.diag_part(sigma_chol), axis=1)  # square root of determinant
+        
+        sigma_chol = tf.linalg.triangular_solve(
+            sigma_chol, tf.eye(self.dim, batch_shape=[batch_size]))  # inverse of cholesky factor of covariance matrix
+        mle = tf.matmul(tf.expand_dims(yhat - mu, axis=1), sigma_chol)
+        mle = tf.matmul(mle, mle, transpose_b=True)
+
+        return tf.reduce_mean(.5*mle+tf.math.log(det))*sample_weight
+        
+        

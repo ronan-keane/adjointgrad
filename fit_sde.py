@@ -1,7 +1,7 @@
 # make sure to run this file in the same folder as sdegrad.py, electricdata.pkl
 import pickle
 import numpy as np
-from sdegrad import sde
+from sdegrad import sde, sde_mle
 import tensorflow as tf
 
 #%%
@@ -39,7 +39,8 @@ test = tf.convert_to_tensor(test, dtype=tf.float32)
 
 #%% make model and optimizer
 
-class mysde(sde):
+# class mysde(sde):
+class mysde(sde_mle):
     # Just the sde class, with periodicity added
     @tf.function
     def add_periodic_input_to_curstate(self, curstate, t):
@@ -51,7 +52,7 @@ class mysde(sde):
         return tf.concat([curstate, temp],1)
 
 
-model = mysde(20, pastlen=12)
+model = mysde(20, pastlen=12, p=3e-4)
 
 #%% training
 
@@ -92,8 +93,8 @@ def baseline(ind):
 import matplotlib.pyplot as plt
 batch_size = 1  # number of replications
 prediction_length = 24*4*7
-ind = 5000  # starting time in test set
-customer = 0  # which customer to plot
+ind = 300  # starting time in test set
+customer = 13  # which customer to plot
 
 offset = len(train)
 assert ind-model.pastlen >=0
@@ -112,7 +113,9 @@ x = [[model.mem[i+model.pastlen][j,customer] for i in range(len(yhat))] for j in
 base_y = [baseline(i)[customer] for i in range(ind, ind+prediction_length)]
 
 plt.plot(y1)
-plt.plot(base_y)
+print('baseline mse is '+str(np.mean(np.square(np.array(y1)-np.array(base_y)))))
+print('sde mse is '+str(np.mean(np.square(np.array(x[0])-np.array(base_y)))))
+# plt.plot(base_y)
 for i in range(len(x)):
     plt.plot(x[i])
 
