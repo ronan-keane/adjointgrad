@@ -21,13 +21,13 @@ class sde(tf.keras.Model):
         self.pastlen = pastlen
 
         # drift architecture
-        self.drift_dense1 = tf.keras.layers.Dense(100, activation='relu')
-        self.drift_dense2 = tf.keras.layers.Dense(100, activation='relu')
+        self.drift_dense1 = tf.keras.layers.Dense(100, activation='tanh')
+        self.drift_dense2 = tf.keras.layers.Dense(100, activation='tanh')
         self.drift_dense3 = tf.keras.layers.Dense(100, activation=None)
         self.drift_output = tf.keras.layers.Dense(dim, activation=None)
         # diffusion architecture
-        self.diff_dense1 = tf.keras.layers.Dense(100, activation='relu')
-        self.diff_dense2 = tf.keras.layers.Dense(100, activation='relu')
+        self.diff_dense1 = tf.keras.layers.Dense(100, activation='tanh')
+        self.diff_dense2 = tf.keras.layers.Dense(100, activation='tanh')
         self.diff_dense3 = tf.keras.layers.Dense(100, activation=None)
         self.diff_output = tf.keras.layers.Dense(int(dim*(dim+1)/2), activation=None)
 
@@ -45,21 +45,28 @@ class sde(tf.keras.Model):
 
         # reverse pass
         pastlen = self.pastlen
-        lam = [0 for i in range(pastlen+1)]  # initialize lambda
-        # lam[-1] stores the current adjoint variable; lam[:-1] accumulates terms from pastlen
-        lam[-1] = 2*(self.mem[-1] - yhat[-1])
+        sample_weight = tf.cast(1/ntimesteps, tf.float32)
         ghat = [0 for i in range(len(self.trainable_variables))] # initialize gradient
+        lam = [[0, 0] for i in range(pastlen+1)]  # initialize lambda
+        # lam[-1] stores the current adjoint variable; lam[:-1] accumulates terms from pastlen
+        # Note that lambda_i needs to have the same shape as h_i.
 
         for i in reversed(range(ntimesteps)):
             # grab x_{i-1}, z_i
             xim1 = self.mem[i:i+pastlen]  # read as x_{i-1}
             zi = self.zmem[i]
+            yhati = yhat[i]
             # calculate vector jacobian products
             with tf.GradientTape() as g:
                 g.watch(xim1)
-                temp = self.step(xim1, zi, tf.convert_to_tensor(start+i, dtype=tf.float32))
-            vjp = g.gradient(temp, [xim1, self.trainable_variables], output_gradients=lam[-1])
-            dfdx = 2*(self.mem[i+pastlen] - yhat[i])/ntimesteps  # read as \dfrac{\partial f}{\partial x}
+                xi_and_det = self.step(xim1, zi, tf.convert_to_tensor(start+i, dtype=tf.float32))
+            with tf.GradientTape() as gg:
+                gg.watch(xi_and_det)
+                f = self.loss(xi_and_det, yhati, sample_weight=sample_weight)
+            dfdx = gg.gradient(f, xi_and_det)  # read as \dfrac{\partial f}{\partial x}
+            lam[-1][0] += dfdx[0]
+            lam[-1][1] += dfdx[1]
+            vjp = g.gradient(xi_and_det, [xim1, self.trainable_variables], output_gradients=lam[-1])
 
             # update gradient
             for j in range(len(ghat)):
@@ -68,9 +75,8 @@ class sde(tf.keras.Model):
             if i > 0:
                 lam.pop(-1)
                 for j in range(pastlen):
-                    lam[j] += vjp[0][j]
-                lam[-1] += dfdx
-                lam.insert(0, 0)
+                    lam[j][0] += vjp[0][j]
+                lam.insert(0, [0,0])
 
         # # rescale gradient by batch size
         # batch_size = tf.cast(tf.shape(init_state)[1], tf.float32)
@@ -89,7 +95,7 @@ class sde(tf.keras.Model):
     @tf.function
     def loss(self, y, yhat, sample_weight=None):
         """"y should be the output of self.step. Returns loss for current prediction."""
-        entropy = tf.math.log(y[1]*(2*3.1416*2.718)**self.dim)
+        entropy = tf.math.reduce_mean(tf.math.log(y[1]))
         return self.loss_fn(yhat, y[0], sample_weight=sample_weight) - entropy*sample_weight*self.p
 
     @tf.function
@@ -121,7 +127,8 @@ class sde(tf.keras.Model):
         # to enforce positive definitness, need to make diagonal positive
         diag = tf.math.exp(tf.linalg.diag_part(diff))
         diff = tf.linalg.set_diag(diff, diag)
-        diff_det = tf.math.reduce_prod(diag)**2  # determinant
+        diff_det = tf.math.reduce_prod(diag, axis=1)  # determinant
+        # diff_det = tf.ones((batch_size, self.dim))
 
         out = self.add_periodic_input_to_curstate(
             last_curstate + drift + tf.squeeze(tf.matmul(diff,z),axis=-1), t)
@@ -152,14 +159,14 @@ class sde(tf.keras.Model):
         self.mem.extend(init_state)
         self.zmem = []  # list of noise, each noise has shape (batch size, dimension, 1)
 
-        obj = tf.zeros((ntimesteps,)) if yhat is not None else None
+        obj = [] if yhat is not None else None
         sample_weight = tf.cast(1/ntimesteps, tf.float32)
 
         for i in range(ntimesteps):
             z = tf.random.normal((batch_size, self.dim, 1))
             nextstate = self.step(self.curstate, z, tf.convert_to_tensor(start+i, dtype=tf.float32))  # call to model
             if yhat is not None:
-                obj[i] = self.loss(nextstate, yhat[i], sample_weight=sample_weight)  # call to loss if requested
+                obj.append(self.loss(nextstate, yhat[i], sample_weight=sample_weight))  # call to loss if requested
 
             self.mem.append(nextstate[0])
             self.zmem.append(z)

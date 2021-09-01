@@ -52,13 +52,13 @@ class mysde(sde):
 
 
 model = mysde(20, pastlen=12)
-optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
+optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
 
 #%% training
 
-batch_size_list = [1, 1, 1, 1, 1, 1, 1]
-prediction_length_list = [12, 24, 48, 96, 192, 384, 672]  # 3 hours up to 1 week
-nbatches_list = [5000, 5000, 5000, 5000, 5000, 5000, 5000]
+batch_size_list = [8, 8, 8, 8, 8]
+prediction_length_list = [12, 24, 48, 96, 192]  # 3 hours up to 1 week
+nbatches_list = [2000, 2000, 2000, 2000, 2000]
 
 assert len(batch_size_list) == len(prediction_length_list) == len(nbatches_list)
 
@@ -83,9 +83,9 @@ for j in range(len(batch_size_list)):
 
 
 #%% test
-
+import matplotlib.pyplot as plt
 batch_size = 1  # number of replications
-prediction_length = 672
+prediction_length = 24*4
 ind = 12
 offset = len(train)
 assert ind-model.pastlen >=0
@@ -96,6 +96,11 @@ curdata = [tf.tile(test[j+ind-model.pastlen:j+ind-model.pastlen+1,:], [batch_siz
 init_state = curdata[:model.pastlen]
 yhat = curdata[model.pastlen:]
 
-obj = model.obj(init_state, prediction_length, yhat, start=ind+offset)
+obj = model.solve(init_state, prediction_length, yhat=yhat, start=ind+offset)
+
+y1 = [yhat[i][0,0] for i in range(len(yhat))]
+x1 = [model.mem[i+model.pastlen][0,0] for i in range(len(yhat))]
+plt.plot(y1)
+plt.plot(x1)
 
 
