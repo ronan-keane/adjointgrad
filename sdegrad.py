@@ -39,6 +39,7 @@ class sde(tf.keras.Model):
         """Calculates objective value and gradient."""
         # this version does not use gradient tape on forward pass; this prevents storing activations in
         # memory. The trade off is the equivalent of an extra forward pass in the reverse pass.
+        # the memory requirements are further reduced because neither the drift or diffusion (covariance) are stored in memory
 
         # forward pass
         obj = self.solve(init_state, ntimesteps, yhat=yhat, start=start)
@@ -47,7 +48,7 @@ class sde(tf.keras.Model):
         pastlen = self.pastlen
         sample_weight = tf.cast(1/ntimesteps, tf.float32)
         ghat = [0 for i in range(len(self.trainable_variables))] # initialize gradient
-        lam = [[0, 0] for i in range(pastlen+1)]  # initialize lambda
+        lam = [self.init_lambda() for i in range(pastlen+1)]
         # lam[-1] stores the current adjoint variable; lam[:-1] accumulates terms from pastlen
         # Note that lambda_i needs to have the same shape as h_i.
 
@@ -64,8 +65,7 @@ class sde(tf.keras.Model):
                 gg.watch(xi_and_extra)
                 f = self.loss(xi_and_extra, yhati, sample_weight=sample_weight)
             dfdx = gg.gradient(f, xi_and_extra)  # read as \dfrac{\partial f}{\partial x}
-            lam[-1][0] += dfdx[0]
-            lam[-1][1] += dfdx[1]
+            lam[-1] = self.add_dfdx_to_lambda(lam[-1], dfdx)
             vjp = g.gradient(xi_and_extra, [xim1, self.trainable_variables], output_gradients=lam[-1])
 
             # update gradient
@@ -76,7 +76,7 @@ class sde(tf.keras.Model):
                 lam.pop(-1)
                 for j in range(pastlen):
                     lam[j][0] += vjp[0][j]
-                lam.insert(0, [0,0])
+                lam.insert(0, self.init_lambda())
 
         # add l2 regularization
         for j in range(len(ghat)):
@@ -86,6 +86,14 @@ class sde(tf.keras.Model):
             return obj[0], ghat
         else:
             return ghat
+
+    def init_lambda(self):
+        return [0, 0]
+
+    def add_dfdx_to_lambda(self, lam, dfdx):
+        lam[0] += dfdx[0]
+        lam[1] += dfdx[1]
+        return lam
 
     @tf.function
     def loss(self, y, yhat, sample_weight=None):
@@ -130,8 +138,8 @@ class sde(tf.keras.Model):
         # call to model architecture
         drift = self.drift(curstate)
         diff = self.diffusion(curstate)
-        
-        
+
+
         diff_det = tf.math.reduce_prod(tf.linalg.diag_part(diff), axis=1)  # determinant
         out = self.add_periodic_input_to_curstate(
             last_curstate + drift + tf.squeeze(tf.matmul(diff,z),axis=-1), t)
@@ -195,31 +203,37 @@ class sde_mle(sde):
         last_curstate = curstate[-1][:,:self.dim]  # most recent measurements
         curstate = tf.transpose(curstate, [1,0,2])
         curstate = tf.reshape(curstate, (batch_size, dim_maybe_with_t*self.pastlen))
-        
+
         # call to model architecture
         drift = self.drift(curstate)
         diff = self.diffusion(curstate)
-        
+
         mu = last_curstate + drift
         out = self.add_periodic_input_to_curstate(
             mu + tf.squeeze(tf.matmul(diff,z),axis=-1), t)
-        
-        return out, [mu, diff]
-    
+
+        return out, mu, diff
+
+    def init_lambda(self):
+        return [0,0,0]  # step returns x_i, drift, diffusion, lambda needs same shape
+
+    def add_dfdx_to_lambda(self, lam, dfdx):  # loss depends on drift, diffusion, dfdx[0] = None
+        lam[1] += dfdx[1]
+        lam[2] += dfdx[2]
+
     @tf.function
     def loss(self, y, yhat, sample_weight=None):
         batch_size = tf.shape(yhat)[0]
         yhat = yhat[:,:self.dim]
-        mu = y[1][0]
-        sigma_chol = y[1][1]
-        
+        mu = y[1]
+        sigma_chol = y[2]
+
         det = tf.math.reduce_prod(tf.linalg.diag_part(sigma_chol), axis=1)  # square root of determinant
-        
+
         sigma_chol = tf.linalg.triangular_solve(
             sigma_chol, tf.eye(self.dim, batch_shape=[batch_size]))  # inverse of cholesky factor of covariance matrix
         mle = tf.matmul(tf.expand_dims(yhat - mu, axis=1), sigma_chol)
         mle = tf.matmul(mle, mle, transpose_b=True)
 
         return tf.reduce_mean(.5*mle+tf.math.log(det))*sample_weight
-        
-        
+
