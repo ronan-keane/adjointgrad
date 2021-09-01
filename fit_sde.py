@@ -55,25 +55,47 @@ model = mysde(20, pastlen=12)
 optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 
 #%% training
-batch_size = 8
-prediction_length = 12
-nbatches = int(len(train)/prediction_length)*10
 
-for i in range(nbatches):
-    ind = int(np.random.rand()*(len(train)-model.pastlen-prediction_length))+model.pastlen  # index of first prediction
-    curdata = [tf.tile(train[j+ind-model.pastlen:j+ind-model.pastlen+1,:], [batch_size, 1]) for j in range(prediction_length+model.pastlen)]
+batch_size_list = [1, 1, 1, 1, 1, 1, 1]
+prediction_length_list = [12, 24, 48, 96, 192, 384, 672]  # 3 hours up to 1 week
+nbatches_list = [5000, 5000, 5000, 5000, 5000, 5000, 5000]
 
-    init_state = curdata[:model.pastlen]
-    yhat = curdata[model.pastlen:]
+assert len(batch_size_list) == len(prediction_length_list) == len(nbatches_list)
 
-    obj, grad = model.grad(init_state, prediction_length, yhat, start=ind)
-    optimizer.apply_gradients(zip(grad, model.trainable_variables))
+for j in range(len(batch_size_list)):
+    batch_size = batch_size_list[j]
+    prediction_length = prediction_length_list[j]
+    nbatches = nbatches_list[j]
 
-    if i % 100 == 0:
-        print('objective value for batch '+str(i)+' is '+str(obj))
+    for i in range(nbatches):
+        ind = int(np.random.rand()*(len(train)-model.pastlen-prediction_length))+model.pastlen  # index of first prediction
+        curdata = [tf.tile(train[j+ind-model.pastlen:j+ind-model.pastlen+1,:], [batch_size, 1]) for j in range(prediction_length+model.pastlen)]
+
+        init_state = curdata[:model.pastlen]
+        yhat = curdata[model.pastlen:]
+
+        obj, grad = model.grad(init_state, prediction_length, yhat, start=ind)
+        optimizer.apply_gradients(zip(grad, model.trainable_variables))
+
+        if i % 100 == 0:
+            print('objective value for batch '+str(i)+' is '+str(obj))
 
 
 
+#%% test
 
+batch_size = 1  # number of replications
+prediction_length = 672
+ind = 12
+offset = len(train)
+assert ind-model.pastlen >=0
+assert ind + prediction_length <= len(test)
+
+curdata = [tf.tile(test[j+ind-model.pastlen:j+ind-model.pastlen+1,:], [batch_size, 1]) for j in range(prediction_length+model.pastlen)]
+
+init_state = curdata[:model.pastlen]
+yhat = curdata[model.pastlen:]
+
+obj = model.obj(init_state, prediction_length, yhat, start=ind+offset)
 
 

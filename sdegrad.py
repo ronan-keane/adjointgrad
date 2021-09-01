@@ -4,45 +4,36 @@ import tensorflow_probability as tfp
 
 class sde(tf.keras.Model):
     """pathwise derivative implementation of nonlinear SDE using Euler-Maruyama discretization"""
-    def __init__(self, dim, pastlen=1):
+    def __init__(self, dim, pastlen=1, delta=.5, l2=.01, p=1e-4):
         """
             dim: dimension of SDE. Does not include any dimensions corresponding to periodic inputs.
                 e.g. Dimension is 10, problem has periodicity in days, so there are 2 extra dimensions
                 corresponding to this periodicity. We predict 10 values every timestep, then add the 2
                 extra time dimensions. self.dim = 10, but there are 12 entries in each prediction.
+                (so the dimension is treated as 12.)
             pastlen: number of past timesteps used to calculate drift/diffusion (1 uses current timestep only)
+            delta: for Huber loss https://www.tensorflow.org/api_docs/python/tf/keras/losses/Huber
+            l2: strength of l2 regularization (l2*self.trainable_variables is added to gradient)
+            p: weight of entropy maximization term.
         """
         super().__init__()
         self.dim = dim
         self.pastlen = pastlen
 
         # drift architecture
-        self.drift_dense1 = tf.keras.layers.Dense(128, activation='relu')
-        self.drift_dense2 = tf.keras.layers.Dense(128, activation='relu')
-        self.drift_dense3 = tf.keras.layers.Dense(128, activation='relu')
+        self.drift_dense1 = tf.keras.layers.Dense(100, activation='relu')
+        self.drift_dense2 = tf.keras.layers.Dense(100, activation='relu')
+        self.drift_dense3 = tf.keras.layers.Dense(100, activation=None)
         self.drift_output = tf.keras.layers.Dense(dim, activation=None)
         # diffusion architecture
-        self.diff_dense1 = tf.keras.layers.Dense(128, activation='relu')
-        self.diff_dense2 = tf.keras.layers.Dense(128, activation='relu')
+        self.diff_dense1 = tf.keras.layers.Dense(100, activation='relu')
+        self.diff_dense2 = tf.keras.layers.Dense(100, activation='relu')
+        self.diff_dense3 = tf.keras.layers.Dense(100, activation=None)
         self.diff_output = tf.keras.layers.Dense(int(dim*(dim+1)/2), activation=None)
 
-    def obj(self, init_state, ntimesteps, yhat, start=0):
-        """Calculates objective value.
-        Inputs:
-            init_state: list of tensors, each tensor has shape (batch size, dimension), list has shape
-                (ntimesteps, batch_size, dimension). init_state are the initial conditions for SDE
-            ntimesteps: integer number of timesteps
-            yhat: target. list of tensors, in shape of (ntimesteps, batch size, dimension)
-        Returns:
-            objective value calculated from self.loss
-        """
-        self.solve(init_state, ntimesteps, start=start)
-        obj = [None for i in range(ntimesteps)]
-        curobj = 0
-        for i in reversed(range(ntimesteps)):
-            curobj += self.loss(self.mem[i+self.pastlen], yhat[i])
-            obj[i] = curobj
-        return obj[-1]
+        self.loss_fn = tf.keras.losses.Huber(delta=delta)
+        self.l2 = tf.cast(l2, tf.float32)
+        self.p = tf.cast(p, tf.float32)
 
     def grad(self, init_state, ntimesteps, yhat, start=0, return_obj=True):
         """Calculates objective value and gradient."""
@@ -50,12 +41,7 @@ class sde(tf.keras.Model):
         # memory. The trade off is the equivalent of an extra forward pass in the reverse pass.
 
         # forward pass
-        self.solve(init_state, ntimesteps, start=start)
-        obj = [None for i in range(ntimesteps)]
-        curobj = 0
-        for i in reversed(range(ntimesteps)):
-            curobj += self.loss(self.mem[i+self.pastlen], yhat[i])
-            obj[i] = curobj
+        obj = self.solve(init_state, ntimesteps, yhat=yhat, start=start)
 
         # reverse pass
         pastlen = self.pastlen
@@ -73,7 +59,7 @@ class sde(tf.keras.Model):
                 g.watch(xim1)
                 temp = self.step(xim1, zi, tf.convert_to_tensor(start+i, dtype=tf.float32))
             vjp = g.gradient(temp, [xim1, self.trainable_variables], output_gradients=lam[-1])
-            dfdx = 2*(self.mem[i+pastlen] - yhat[i])  # read as \dfrac{\partial f}{\partial x}
+            dfdx = 2*(self.mem[i+pastlen] - yhat[i])/ntimesteps  # read as \dfrac{\partial f}{\partial x}
 
             # update gradient
             for j in range(len(ghat)):
@@ -86,24 +72,32 @@ class sde(tf.keras.Model):
                 lam[-1] += dfdx
                 lam.insert(0, 0)
 
-        # rescale gradient by batch size - seems tf does not do this automatically in this case
-        batch_size = tf.cast(tf.shape(init_state)[1], tf.float32)
+        # # rescale gradient by batch size
+        # batch_size = tf.cast(tf.shape(init_state)[1], tf.float32)
+        # for j in range(len(ghat)):
+        #     ghat[j] = ghat[j] / batch_size
+
+        # add l2 regularization
         for j in range(len(ghat)):
-            ghat[j] = ghat[j] / batch_size
+            ghat[j] += self.l2*self.trainable_variables[j]
 
         if return_obj:
-            return obj[-1], ghat
+            return obj[0], ghat
         else:
             return ghat
 
     @tf.function
-    def loss(self, y, yhat):
-        return tf.math.reduce_mean(tf.math.square(y - yhat))
+    def loss(self, y, yhat, sample_weight=None):
+        """"y should be the output of self.step. Returns loss for current prediction."""
+        entropy = tf.math.log(y[1]*(2*3.1416*2.718)**self.dim)
+        return self.loss_fn(yhat, y[0], sample_weight=sample_weight) - entropy*sample_weight*self.p
 
     @tf.function
     def step(self, curstate, z, t):
         """
+        The equivalent of the h_i function.
             curstate: shape (pastlen, batch size, dimension). current measurements + history
+                (curstate is equivalent to x_{i-1})
             z: shape (batch size, dimension, 1) where each entry is normally distributed
             t: time index of prediction
         """
@@ -111,32 +105,44 @@ class sde(tf.keras.Model):
         last_curstate = curstate[-1][:,:self.dim]  # most recent measurements
         curstate = tf.transpose(curstate, [1,0,2])
         curstate = tf.reshape(curstate, (batch_size, dim_maybe_with_t*self.pastlen))
-
-        drift = self.drift_dense1(curstate)
-        drift = self.drift_dense2(drift)
-        drift = self.drift_dense3(drift)
+        # drift
+        drift1 = self.drift_dense1(curstate)
+        drift = self.drift_dense2(drift1)
+        drift = self.drift_dense3(drift + drift1)
+        drift = tf.keras.activations.relu(drift)
         drift = self.drift_output(drift)
-        # tf.assert_equal(tf.shape(drift), (batch_size, self.dim))
-
-        diff = self.diff_dense1(curstate)
-        diff = self.diff_dense2(diff)
+        # diffusion
+        diff1 = self.diff_dense1(curstate)
+        diff = self.diff_dense2(diff1)
+        diff = self.diff_dense3(diff + diff1)
+        diff = tf.keras.activations.relu(diff)
         diff = self.diff_output(diff)
-        # tf.assert_equal(tf.shape(diff), (batch_size, self.dim*self.dim))
+        diff = tfp.math.fill_triangular(diff)
+        # to enforce positive definitness, need to make diagonal positive
+        diag = tf.math.exp(tf.linalg.diag_part(diff))
+        diff = tf.linalg.set_diag(diff, diag)
+        diff_det = tf.math.reduce_prod(diag)**2  # determinant
 
-        return self.add_periodic_input_to_curstate(
-            last_curstate + drift + tf.squeeze(tf.matmul(tfp.math.fill_triangular(diff),z),axis=-1), t)
+        out = self.add_periodic_input_to_curstate(
+            last_curstate + drift + tf.squeeze(tf.matmul(diff,z),axis=-1), t)
+
+        return out, diff_det  # returns tuple of (x_i, determinant) - det is used in loss
 
     @tf.function
     def add_periodic_input_to_curstate(self, curstate, t):
         """Curstate has shape (batch size, self.dim). t is current time index. Add time to curstate."""
         return curstate
 
-    def solve(self, init_state, ntimesteps, start=0):
+    def solve(self, init_state, ntimesteps, yhat=None, start=0):
         """
-            init_state: length pastlen list of tensors, each tensor has shape (batch size, dimension)
-                init_state are the initial conditions for SDE
+        Inputs:
+            init_state: list of tensors, each tensor has shape (batch size, dimension), list has shape
+                (ntimesteps, batch_size, dimension). init_state are the initial conditions for SDE
             ntimesteps: integer number of timesteps
+            yhat: target. list of tensors, in shape of (ntimesteps, batch size, dimension)
             start: time index of first prediction (init_state[-1]+1). Assumed same for entire batch.
+        Returns:
+            objective value calculated from self.loss (when yhat is not None)
         """
         # tf.assert_equal(tf.shape(init_state)[0::2], (self.pastlen, self.dim))
         batch_size = tf.shape(init_state)[1]
@@ -146,12 +152,21 @@ class sde(tf.keras.Model):
         self.mem.extend(init_state)
         self.zmem = []  # list of noise, each noise has shape (batch size, dimension, 1)
 
+        obj = tf.zeros((ntimesteps,)) if yhat is not None else None
+        sample_weight = tf.cast(1/ntimesteps, tf.float32)
+
         for i in range(ntimesteps):
             z = tf.random.normal((batch_size, self.dim, 1))
             nextstate = self.step(self.curstate, z, tf.convert_to_tensor(start+i, dtype=tf.float32))  # call to model
+            if yhat is not None:
+                obj[i] = self.loss(nextstate, yhat[i], sample_weight=sample_weight)  # call to loss if requested
 
-            self.mem.append(nextstate)
+            self.mem.append(nextstate[0])
             self.zmem.append(z)
 
             self.curstate = self.mem[-self.pastlen:]
+
+        if yhat is not None:
+            obj = tf.math.cumsum(obj, reverse=True)
+        return obj
 
