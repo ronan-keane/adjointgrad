@@ -52,18 +52,19 @@ class mysde(sde):
 
 
 model = mysde(20, pastlen=12)
-optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
 
 #%% training
 
 batch_size_list = [8, 8, 8, 8, 8]
-prediction_length_list = [12, 24, 48, 96, 192]  # 3 hours up to 1 week
+learning_rate_list = [1e-4, 1e-4, 5e-5, 1e-5, 5e-6]
+prediction_length_list = [12, 24, 48, 96, 192]  # 3 hours up to 2 days
 nbatches_list = [2000, 2000, 2000, 2000, 2000]
 
-assert len(batch_size_list) == len(prediction_length_list) == len(nbatches_list)
+assert len(batch_size_list) == len(learning_rate_list) == len(prediction_length_list) == len(nbatches_list)
 
 for j in range(len(batch_size_list)):
     batch_size = batch_size_list[j]
+    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate_list[j])
     prediction_length = prediction_length_list[j]
     nbatches = nbatches_list[j]
 
@@ -81,15 +82,23 @@ for j in range(len(batch_size_list)):
             print('objective value for batch '+str(i)+' is '+str(obj))
 
 
+#%% make baseline model which uses average electric in that time at that day
+baseline_predictions = [np.mean(train[i::384], axis=0) for i in range(384)]
+def baseline(ind):
+    ind = (ind+len(train))%384
+    return baseline_predictions[ind]
 
 #%% test
 import matplotlib.pyplot as plt
 batch_size = 1  # number of replications
-prediction_length = 24*4
-ind = 12
+prediction_length = 24*4*7
+ind = 5000  # starting time in test set
+customer = 0  # which customer to plot
+
 offset = len(train)
 assert ind-model.pastlen >=0
 assert ind + prediction_length <= len(test)
+assert customer < 20
 
 curdata = [tf.tile(test[j+ind-model.pastlen:j+ind-model.pastlen+1,:], [batch_size, 1]) for j in range(prediction_length+model.pastlen)]
 
@@ -98,9 +107,14 @@ yhat = curdata[model.pastlen:]
 
 obj = model.solve(init_state, prediction_length, yhat=yhat, start=ind+offset)
 
-y1 = [yhat[i][0,0] for i in range(len(yhat))]
-x1 = [model.mem[i+model.pastlen][0,0] for i in range(len(yhat))]
+y1 = [yhat[i][0,customer] for i in range(len(yhat))]
+x = [[model.mem[i+model.pastlen][j,customer] for i in range(len(yhat))] for j in range(batch_size)]
+base_y = [baseline(i)[customer] for i in range(ind, ind+prediction_length)]
+
 plt.plot(y1)
-plt.plot(x1)
+plt.plot(base_y)
+for i in range(len(x)):
+    plt.plot(x[i])
+
 
 
