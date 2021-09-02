@@ -48,7 +48,7 @@ class sde(tf.keras.Model):
         pastlen = self.pastlen
         sample_weight = tf.cast(1/ntimesteps, tf.float32)
         ghat = [0 for i in range(len(self.trainable_variables))] # initialize gradient
-        lam = [self.init_lambda() for i in range(pastlen+1)]
+        lam = [self.init_lambda() for i in range(pastlen+1)]  # initialize adjoint variables
         # lam[-1] stores the current adjoint variable; lam[:-1] accumulates terms from pastlen
         # Note that lambda_i needs to have the same shape as h_i.
 
@@ -215,11 +215,15 @@ class sde_mle(sde):
         return out, mu, diff
 
     def init_lambda(self):
-        return [0,0,0]  # step returns x_i, drift, diffusion, lambda needs same shape
+        if hasattr(self, 'lambda_x_init'):
+            return [self.lambda_x_init,0,0]  # step returns x_i, drift, diffusion, lambda needs same shape
+        self.lambda_x_init = tf.zeros(tf.shape(self.mem[0]))
+        return [self.lambda_x_init, 0, 0]
 
-    def add_dfdx_to_lambda(self, lam, dfdx):  # loss depends on drift, diffusion, dfdx[0] = None
+    def add_dfdx_to_lambda(self, lam, dfdx):  # loss depends on drift, diffusion only, dfdx[0] = None
         lam[1] += dfdx[1]
         lam[2] += dfdx[2]
+        return lam
 
     @tf.function
     def loss(self, y, yhat, sample_weight=None):
@@ -233,7 +237,7 @@ class sde_mle(sde):
         sigma_chol = tf.linalg.triangular_solve(
             sigma_chol, tf.eye(self.dim, batch_shape=[batch_size]))  # inverse of cholesky factor of covariance matrix
         mle = tf.matmul(tf.expand_dims(yhat - mu, axis=1), sigma_chol)
-        mle = tf.matmul(mle, mle, transpose_b=True)
+        mle = tf.squeeze(tf.matmul(mle, mle, transpose_b=True), [1, 2])
 
         return tf.reduce_mean(.5*mle+tf.math.log(det))*sample_weight
 

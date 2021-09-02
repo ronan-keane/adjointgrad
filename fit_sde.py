@@ -37,7 +37,7 @@ test = np.concatenate([test, periods[split_ind:]], axis=1)
 train = tf.convert_to_tensor(train, dtype=tf.float32)
 test = tf.convert_to_tensor(test, dtype=tf.float32)
 
-#%% make model and optimizer
+#%% make model
 
 # class mysde(sde):
 class mysde(sde_mle):
