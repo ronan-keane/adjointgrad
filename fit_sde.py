@@ -55,11 +55,16 @@ class mysde(sde_mle):
 model = mysde(20, pastlen=12, p=3e-4)
 
 #%% training
-
-batch_size_list = [8, 8, 8, 8, 8]
-learning_rate_list = [1e-4, 1e-4, 5e-5, 1e-5, 5e-6]
-prediction_length_list = [12, 24, 48, 96, 192]  # 3 hours up to 2 days
-nbatches_list = [2000, 2000, 2000, 2000, 2000]
+# # used for huber loss
+# batch_size_list = [8, 8, 8, 8, 8]
+# learning_rate_list = [1e-4, 1e-4, 5e-5, 1e-5, 1e-6]
+# prediction_length_list = [12, 24, 48, 96, 192]  # 3 hours up to 2 days
+# nbatches_list = [2000, 2000, 2000, 2000, 2000]
+# for mle loss
+batch_size_list = [8, 8, 8, 8, 8, 8, 8]
+learning_rate_list = [1e-4, 1e-3, 1e-4, 5e-5, 1e-5, 5e-6, 1e-6]
+prediction_length_list = [12, 12, 12, 24, 48, 96, 192]  # 3 hours up to 2 days
+nbatches_list = [2000, 2000, 2000, 2000, 2000, 2000]
 
 assert len(batch_size_list) == len(learning_rate_list) == len(prediction_length_list) == len(nbatches_list)
 
@@ -94,7 +99,7 @@ import matplotlib.pyplot as plt
 batch_size = 1  # number of replications
 prediction_length = 24*4*7
 ind = 300  # starting time in test set
-customer = 13  # which customer to plot
+customer = 1  # which customer to plot
 
 offset = len(train)
 assert ind-model.pastlen >=0
