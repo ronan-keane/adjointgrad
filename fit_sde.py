@@ -39,8 +39,8 @@ test = tf.convert_to_tensor(test, dtype=tf.float32)
 
 #%% make model
 
-# class mysde(sde):
-class mysde(sde_mle):
+class mysde(sde):
+# class mysde(sde_mle):
     # Just the sde class, with periodicity added
     @tf.function
     def add_periodic_input_to_curstate(self, curstate, t):
@@ -88,18 +88,19 @@ for j in range(len(batch_size_list)):
             print('objective value for batch '+str(i)+' is '+str(obj))
 
 
-#%% make baseline model which uses average electric in that time at that day
-baseline_predictions = [np.mean(train[i::384], axis=0) for i in range(384)]
+#%% make baseline model which uses average electric in that time at that day of the week
+period = 384
+baseline_predictions = [np.mean(train[i::period], axis=0) for i in range(period)]
 def baseline(ind):
-    ind = (ind+len(train))%384
+    ind = (ind+len(train))%(period)
     return baseline_predictions[ind]
 
 #%% test
 import matplotlib.pyplot as plt
-batch_size = 1  # number of replications
+batch_size = 200  # number of replications
 prediction_length = 24*4*7
-ind = 300  # starting time in test set
-customer = 1  # which customer to plot
+ind = 12  # starting time in test set
+customer = 10  # which customer to plot
 
 offset = len(train)
 assert ind-model.pastlen >=0
@@ -119,10 +120,38 @@ base_y = [baseline(i)[customer] for i in range(ind, ind+prediction_length)]
 
 plt.plot(y1)
 print('baseline mse is '+str(np.mean(np.square(np.array(y1)-np.array(base_y)))))
-print('sde mse is '+str(np.mean(np.square(np.array(x[0])-np.array(base_y)))))
-# plt.plot(base_y)
-for i in range(len(x)):
+print('sde mse is '+str(np.mean(np.square(np.array(x[0])-np.array(y1)))))
+plt.plot(base_y)
+for i in range(1):
     plt.plot(x[i])
 
+#%% fancy plot
+from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
+
+x = np.zeros((prediction_length, batch_size))
+for i in range(len(x)):
+    x[i,:] = model.mem[i+model.pastlen][:,customer]
+    
+mean = np.mean(x,axis=1)
+std = np.std(x,axis=1)
+t = list(range(ind+len(train), ind+len(train)+prediction_length))
+
+plt.figure(figsize=(10,8))
+frame = plt.gca()
+plt.plot(t, y1, 'C0')
+plt.fill_between(t, mean-std, mean+std, alpha=.3, facecolor='C2')
+plt.plot(t, base_y, 'C1')
+plt.plot(t, x[:,0], 'C2', alpha=.3)
+frame.axes.get_xaxis().set_visible(False)
+plt.ylabel('normalized demand')
+plt.xlabel('time (7 days total)')
+
+legend_elements = [Line2D([0], [0], color='C0', label='ground truth'),
+                   Patch(facecolor='C2', alpha=.3, label='Huber SDE mean '+u'\u00b1'+' std dev'),
+                   Line2D([0], [0], color = 'C2', alpha=.3, label = 'Huber SDE example prediction'),
+                   Line2D([0], [0], color='C1', label = 'historical average')]
+
+frame.legend(handles=legend_elements)
 
 
