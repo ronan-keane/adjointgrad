@@ -105,7 +105,7 @@ class sde(tf.keras.Model):
     def drift(self, curstate):
         drift1 = self.drift_dense1(curstate)
         drift = self.drift_dense2(drift1)
-        drift = self.drift_dense3(drift + drift1)
+        drift = self.drift_dense3(drift) + drift1
         drift = tf.keras.activations.relu(drift)
         return self.drift_output(drift)
 
@@ -113,7 +113,7 @@ class sde(tf.keras.Model):
     def diffusion(self, curstate):
         diff1 = self.diff_dense1(curstate)
         diff = self.diff_dense2(diff1)
-        diff = self.diff_dense3(diff + diff1)
+        diff = self.diff_dense3(diff) + diff1
         diff = tf.keras.activations.relu(diff)
         diff = self.diff_output(diff)
         diff = tfp.math.fill_triangular(diff)
