@@ -276,10 +276,10 @@ class jump_ode(tf.keras.Model):
         self.drift_dense3 = tf.keras.layers.Dense(100, activation=None)
         self.drift_output = tf.keras.layers.Dense(dim, activation=None)
         # jumps architecture
-        self.jumps_dense1 = tf.keras.layers.Dense(100, activation='tanh')
-        self.jumps_dense2 = tf.keras.layers.Dense(100, activation='tanh')
-        self.jumps_dense3 = tf.keras.layers.Dense(100, activation=None)
-        self.jumps_output = tf.keras.layers.Dense(dim*(2*jumpdim-1), activation=None)
+        self.logits_dense1 = tf.keras.layers.Dense(100, activation='relu')
+        self.logits_output = tf.keras.layers.Dense(dim*jumpdim, activation=None)
+        self.jumps_dense1 = tf.keras.layers.Dense(100, activation='relu')
+        self.jumps_output = tf.keras.layers.Dense(dim*(jumpdim-1), activation=None)
 
         self.loss_fn = tf.keras.losses.Huber(delta=delta)
         self.l2 = tf.cast(l2, tf.float32)
@@ -295,14 +295,10 @@ class jump_ode(tf.keras.Model):
 
     @tf.function
     def jumps(self, curstate):
-        jump1 = self.jumps_dense1(curstate)
-        jumps = self.jumps_dense2(jump1)
-        jumps = self.jumps_dense3(jumps) + jump1
-        jumps = tf.keras.activations.relu(jumps)
+        logits = self.logits_dense1(curstate)
+        logits = self.logits_output(logits)
+        jumps = self.jumps_dense1(curstate)
         jumps = self.jumps_output(jumps)
-
-        logits = jumps[:, :self.dim*self.jumpdim] # (for each dim) first jumpdim outputs = logits
-        jumps = jumps[:, self.dim*self.jumpdim:]  # (for each dim) next (jumpdim - 1) outputs = jump sizes
         return logits, jumps
 
     @tf.function

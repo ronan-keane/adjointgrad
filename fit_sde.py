@@ -68,7 +68,7 @@ model = mysde(20, 3, pastlen=12, p=1e-4)
 # nbatches_list = [2000, 2000, 2000, 2000, 2000, 2000]
 # for jump_ode
 batch_size_list = [8, 8, 8, 8, 8]
-learning_rate_list = [1e-4, 1e-4, 5e-5, 1e-5, 1e-6]
+learning_rate_list = [1e-4, 1e-4, 1e-4, 1e-4, 1e-4]
 prediction_length_list = [12, 24, 48, 96, 192]  # 3 hours up to 2 days
 nbatches_list = [2000, 2000, 2000, 2000, 2000]
 
@@ -90,7 +90,7 @@ for j in range(len(batch_size_list)):
         obj, grad = model.grad(init_state, prediction_length, yhat, start=ind)
         optimizer.apply_gradients(zip(grad, model.trainable_variables))
 
-        if i % 10 == 0:
+        if i % 100 == 0:
             print('objective value for batch '+str(i)+' is '+str(obj))
 
 
