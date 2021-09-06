@@ -4,7 +4,7 @@ import tensorflow_probability as tfp
 
 class sde(tf.keras.Model):
     """pathwise derivative implementation of nonlinear SDE using Euler-Maruyama discretization"""
-    def __init__(self, dim, pastlen=1, delta=.5, l2=.01, p=1e-4):
+    def __init__(self, dim, pastlen=1, delta=.5, l2=.01, p=3e-4):
         """
             dim: dimension of SDE. Does not include any dimensions corresponding to periodic inputs.
                 e.g. Dimension is 10, problem has periodicity in days, so there are 2 extra dimensions
@@ -357,11 +357,11 @@ class jump_ode(tf.keras.Model):
         # make probabilities/entropy
         probs = tf.exp(logits)
         probs = probs/tf.reshape(tf.reduce_sum(probs, axis=1), (batch_size*self.dim, 1))  # normmalize
+        probs = tf.reshape(probs, (batch_size, self.dim, self.jumpdim))
         # return entropy averaged over each dimension, each batch
-        entropy = tf.reshape(probs, (batch_size, self.dim, self.jumpdim))
-        entropy = tf.reduce_mean(tf.reduce_sum(entropy*tf.math.log(entropy),axis=2))
+        entropy = tf.reduce_mean(tf.reduce_sum(probs*tf.math.log(probs),axis=2))
 
-        if use_y: # forward pass
+        if use_y==None: # forward pass
             return out, entropy, y
         else:  # reverse
             # create log probability of the jumps corresponding to y
@@ -418,7 +418,7 @@ class jump_ode(tf.keras.Model):
         pastlen = self.pastlen
         sample_weight = tf.cast(1/ntimesteps, tf.float32)
         ghat = [0 for i in range(len(self.trainable_variables))] # initialize gradient
-        lam = [[0, 0, obj[-(i+1)]] for i in reversed(range(pastlen+1))]  # initialize adjoint variables
+        lam = [[0, 0, obj[max(i, 0)]] for i in range(ntimesteps-1-pastlen,ntimesteps)]  # initialize adjoint variables
         # lam[-1] stores the current adjoint variable; lam[:-1] accumulates terms from pastlen
         # Note that lambda_i needs to have the same shape as step when use_y = y
 
@@ -436,7 +436,7 @@ class jump_ode(tf.keras.Model):
                 f = self.loss(xi, truei, entropy, sample_weight=sample_weight)
             dfdx = gg.gradient(f, [xi, entropy])
             lam[-1][0] += dfdx[0]
-            lam[1][1] += dfdx[1]
+            lam[-1][1] += dfdx[1]
             vjp = g.gradient(xi_and_extra, [xim1, self.trainable_variables], output_gradients=lam[-1])
 
             # update gradient
@@ -447,7 +447,7 @@ class jump_ode(tf.keras.Model):
                 lam.pop(-1)
                 for j in range(pastlen):
                     lam[j][0] += vjp[0][j]
-                lam.insert(0, [0, 0, obj[i-1]])
+                lam.insert(0, [0, 0, obj[max(i-1-pastlen,0)]])
 
         # add l2 regularization
         for j in range(len(ghat)):

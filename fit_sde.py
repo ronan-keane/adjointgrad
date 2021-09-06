@@ -1,7 +1,7 @@
 # make sure to run this file in the same folder as sdegrad.py, electricdata.pkl
 import pickle
 import numpy as np
-from sdegrad import sde, sde_mle
+from sdegrad import sde, sde_mle, jump_ode
 import tensorflow as tf
 
 #%%
@@ -39,8 +39,9 @@ test = tf.convert_to_tensor(test, dtype=tf.float32)
 
 #%% make model
 
-class mysde(sde):
+# class mysde(sde):
 # class mysde(sde_mle):
+class mysde(jump_ode):
     # Just the sde class, with periodicity added
     @tf.function
     def add_periodic_input_to_curstate(self, curstate, t):
@@ -52,19 +53,24 @@ class mysde(sde):
         return tf.concat([curstate, temp],1)
 
 
-model = mysde(20, pastlen=12, p=3e-4)
+model = mysde(20, 3, pastlen=12, p=1e-4)
 
 #%% training
-# # used for huber loss
+# used for huber loss
 # batch_size_list = [8, 8, 8, 8, 8]
 # learning_rate_list = [1e-4, 1e-4, 5e-5, 1e-5, 1e-6]
 # prediction_length_list = [12, 24, 48, 96, 192]  # 3 hours up to 2 days
 # nbatches_list = [2000, 2000, 2000, 2000, 2000]
 # for mle loss
-batch_size_list = [8, 8, 8, 8, 8, 8, 8]
-learning_rate_list = [1e-4, 1e-3, 1e-4, 5e-5, 1e-5, 5e-6, 1e-6]
-prediction_length_list = [12, 12, 12, 24, 48, 96, 192]  # 3 hours up to 2 days
-nbatches_list = [2000, 2000, 2000, 2000, 2000, 2000]
+# batch_size_list = [8, 8, 8, 8, 8, 8, 8]
+# learning_rate_list = [1e-4, 1e-3, 1e-4, 5e-5, 1e-5, 5e-6, 1e-6]
+# prediction_length_list = [12, 12, 12, 24, 48, 96, 192]  # 3 hours up to 2 days
+# nbatches_list = [2000, 2000, 2000, 2000, 2000, 2000]
+# for jump_ode
+batch_size_list = [8, 8, 8, 8, 8]
+learning_rate_list = [1e-4, 1e-4, 5e-5, 1e-5, 1e-6]
+prediction_length_list = [12, 24, 48, 96, 192]  # 3 hours up to 2 days
+nbatches_list = [2000, 2000, 2000, 2000, 2000]
 
 assert len(batch_size_list) == len(learning_rate_list) == len(prediction_length_list) == len(nbatches_list)
 
@@ -84,7 +90,7 @@ for j in range(len(batch_size_list)):
         obj, grad = model.grad(init_state, prediction_length, yhat, start=ind)
         optimizer.apply_gradients(zip(grad, model.trainable_variables))
 
-        if i % 100 == 0:
+        if i % 10 == 0:
             print('objective value for batch '+str(i)+' is '+str(obj))
 
 
@@ -97,7 +103,7 @@ def baseline(ind):
 
 #%% test
 import matplotlib.pyplot as plt
-batch_size = 200  # number of replications
+batch_size = 1  # number of replications
 prediction_length = 24*4*7
 ind = 12  # starting time in test set
 customer = 10  # which customer to plot
@@ -112,7 +118,7 @@ curdata = [tf.tile(test[j+ind-model.pastlen:j+ind-model.pastlen+1,:], [batch_siz
 init_state = curdata[:model.pastlen]
 yhat = curdata[model.pastlen:]
 
-obj = model.solve(init_state, prediction_length, yhat=yhat, start=ind+offset)
+obj = model.solve(init_state, prediction_length, yhat, start=ind+offset)
 
 y1 = [yhat[i][0,customer] for i in range(len(yhat))]
 x = [[model.mem[i+model.pastlen][j,customer] for i in range(len(yhat))] for j in range(batch_size)]
@@ -132,7 +138,7 @@ from matplotlib.lines import Line2D
 x = np.zeros((prediction_length, batch_size))
 for i in range(len(x)):
     x[i,:] = model.mem[i+model.pastlen][:,customer]
-    
+
 mean = np.mean(x,axis=1)
 std = np.std(x,axis=1)
 t = list(range(ind+len(train), ind+len(train)+prediction_length))
