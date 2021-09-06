@@ -10,7 +10,6 @@ class sde(tf.keras.Model):
                 e.g. Dimension is 10, problem has periodicity in days, so there are 2 extra dimensions
                 corresponding to this periodicity. We predict 10 values every timestep, then add the 2
                 extra time dimensions. self.dim = 10, but there are 12 entries in each prediction.
-                (so the dimension is treated as 12.)
             pastlen: number of past timesteps used to calculate drift/diffusion (1 uses current timestep only)
             delta: for Huber loss https://www.tensorflow.org/api_docs/python/tf/keras/losses/Huber
             l2: strength of l2 regularization (l2*self.trainable_variables is added to gradient)
@@ -106,6 +105,7 @@ class sde(tf.keras.Model):
         drift1 = self.drift_dense1(curstate)
         drift = self.drift_dense2(drift1)
         drift = self.drift_dense3(drift) + drift1
+        # drift = self.drift_dense3(drift + drift1)  # saved weights correspond to this typo
         drift = tf.keras.activations.relu(drift)
         return self.drift_output(drift)
 
@@ -114,6 +114,7 @@ class sde(tf.keras.Model):
         diff1 = self.diff_dense1(curstate)
         diff = self.diff_dense2(diff1)
         diff = self.diff_dense3(diff) + diff1
+        # diff = self.diff_dense3(diff + diff1)  # saved weights correspond to this typo
         diff = tf.keras.activations.relu(diff)
         diff = self.diff_output(diff)
         diff = tfp.math.fill_triangular(diff)
@@ -240,4 +241,141 @@ class sde_mle(sde):
         mle = tf.squeeze(tf.matmul(mle, mle, transpose_b=True), [1, 2])
 
         return tf.reduce_mean(.5*mle+tf.math.log(det))*sample_weight
+
+
+class jump_ode(tf.keras.Model):
+    """ODE with discrete jumps."""
+    def __init__(self, dim, jumpdim, pastlen=1, delta=.5, l2=.01, p=1e-4):
+        """
+            dim: dimension of ODE. Does not include any dimensions corresponding to periodic inputs.
+                e.g. Dimension is 10, problem has periodicity in days, so there are 2 extra dimensions
+                corresponding to this periodicity. We predict 10 values every timestep, then add the 2
+                extra time dimensions. self.dim = 10, but there are 12 entries in each prediction.
+                periodic inputs are controled by add_periodic_inputs_to_curstate
+            jumpdim: discrete choices for jumps. Must be at least 2. At every timestep, there are jumpdim
+                possibilities for what the jump will be, and one the possibilities is no jump.
+            pastlen: number of past timesteps used to calculate next step (1 uses current timestep only)
+            delta: for Huber loss https://www.tensorflow.org/api_docs/python/tf/keras/losses/Huber
+            l2: strength of l2 regularization (l2*self.trainable_variables is added to gradient)
+            p: weight of entropy maximization term.
+        """
+        super().__init__()
+        assert type(dim) == int
+        assert type(jumpdim) == int
+        assert type(pastlen) == int
+        assert dim>0
+        assert jumpdim > 1
+        assert pastlen >0
+        self.dim = dim
+        self.jumpdim = jumpdim
+        self.pastlen = pastlen
+
+        self.drift_dense1 = tf.keras.layers.Dense(100, activation='tanh')
+        self.drift_dense2 = tf.keras.layers.Dense(100, activation='tanh')
+        self.drift_dense3 = tf.keras.layers.Dense(100, activation=None)
+        self.drift_output = tf.keras.layers.Dense(dim, activation=None)
+
+        self.jumps_dense1 = tf.keras.layers.Dense(100, activation='tanh')
+        self.jumps_dense2 = tf.keras.layers.Dense(100, activation='tanh')
+        self.jumps_dense3 = tf.keras.layers.Dense(100, activation=None)
+        self.jumps_output = tf.keras.layers.Dense(dim*(2*jumpdim-1), activation=None)
+
+        self.loss_fn = tf.keras.losses.Huber(delta=delta)
+        self.l2 = tf.cast(l2, tf.float32)
+        self.p = tf.cast(p, tf.float32)
+
+    @tf.function
+    def drift(self, curstate):
+        drift1 = self.drift_dense1(curstate)
+        drift = self.drift_dense2(drift1)
+        drift = self.drift_dense3(drift) + drift1
+        drift = tf.keras.activations.relu(drift)
+        return self.drift_output(drift)
+
+    @tf.function
+    def jumps(self, curstate):
+        jump1 = self.jumps_dense1(curstate)
+        jumps = self.jumps_dense2(jump1)
+        jumps = self.jumps_dense3(jumps) + jump1
+        jumps = tf.keras.activations.relu(jumps)
+        jumps = self.diff_output(jumps)
+
+        logits = jumps[:, :self.dim*self.jumpdim] # first jumpdim outputs = logits
+        jumps = jumps[:, self.dim*self.jumpdim:]  # next (jumpdim - 1) outputs = jump sizes
+        return logits, jumps
+
+    @tf.function
+    def add_periodic_input_to_curstate(self, curstate, t):
+        """Curstate has shape (batch size, self.dim). t is current time index. Add time to curstate."""
+        return curstate
+
+    @tf.function
+    def loss(self, pred, true, entropy, sample_weight=None):
+        """Returns loss for the current prediction, pred, with entropy maximization term."""
+        return self.loss_fn(true, pred, sample_weight=sample_weight) - entropy*sample_weight*self.p
+
+    @tf.function
+    def step_forward(self, curstate, t):
+        batch_size, dim_maybe_with_t = tf.shape(curstate)[1], tf.shape(curstate)[2]
+        last_curstate = curstate[-1][:,:self.dim]  # most recent measurements
+        curstate = tf.transpose(curstate, [1,0,2])
+        curstate = tf.reshape(curstate, (batch_size, dim_maybe_with_t*self.pastlen))
+
+        # call to model
+        drift = self.drift(curstate)
+        logits, jumps = self.jumps(curstate)
+        jumps = tf.reshape(jumps, (batch_size, self.dim, self.jumpdim-1))
+        jumps = tf.concat([self.jumps_zero_pad, jumps], axis=2)
+        logits = tf.reshape(logits, (batch_size*self.dim, self.jumpdim))
+
+        # sample y, which represents which jump category we take
+        y = tf.reshape(tf.random.categorical(logits, 1, dtype=tf.int32), (batch_size, self.dim))
+        # select corresponding jump from y
+        ind0 = tf.repeat(tf.range(batch_size), [self.dim])
+        ind1 = tf.tile(tf.range(self.dim), [batch_size])
+        jumps = tf.gather_nd(jumps, tf.stack([ind0, ind1, y], axis=1))
+        jumps = tf.reshape(jumps, (batch_size, self.dim))
+
+        out = self.add_periodic_input_to_curstate(
+            last_curstate + drift + jumps)
+
+        probs = tf.exp(logits)
+        probs = probs/tf.reshape(tf.reduce_sum(probs, axis=1), (batch_size*self.dim, 1))
+        probs = tf.reshape(probs, (batch_size, self.dim, self.jumpdim))
+        entropy = tf.reduce_mean(tf.reduce_sum(probs*tf.math.log(probs),axis=2))
+
+        return out, entropy, y
+
+
+    def solve(self, init_state, ntimesteps, yhat=None, start=0):
+        batch_size = tf.shape(init_state)[1]
+        self.curstate = init_state
+
+        self.mem = []  # list of measurements, each measurement has shape (batch size, dimension)
+        self.mem.extend(init_state)
+        self.ymem = []  # list of jump choices, each choice has shape (batch size, dimension) and corresponds
+        # to the index of the selected jump
+        self.jumps_zero_pad = tf.zeros((batch_size, self.dim, 1))
+
+        obj = [] if yhat is not None else None
+        sample_weight = tf.cast(1/ntimesteps, tf.float32)
+
+        for i in range(ntimesteps):
+            nextstate, entropy, y = self.step_forward(
+                self.curstate, tf.convert_to_tensor(start+i, dtype=tf.float32))
+            if yhat is not None:
+                obj.append(self.loss(nextstate, yhat[i], entropy, sample_weight=sample_weight))
+
+            self.mem.append(nextstate)
+            self.ymem.append(y)
+
+            self.curstate = self.mem[-self.pastlen:]
+
+        if yhat is not None:
+            obj = tf.math.cumsum(obj, reverse=True)
+        return obj
+
+
+
+
 
