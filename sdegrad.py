@@ -270,11 +270,12 @@ class jump_ode(tf.keras.Model):
         self.jumpdim = jumpdim
         self.pastlen = pastlen
 
+        # drift architecture
         self.drift_dense1 = tf.keras.layers.Dense(100, activation='tanh')
         self.drift_dense2 = tf.keras.layers.Dense(100, activation='tanh')
         self.drift_dense3 = tf.keras.layers.Dense(100, activation=None)
         self.drift_output = tf.keras.layers.Dense(dim, activation=None)
-
+        # jumps architecture
         self.jumps_dense1 = tf.keras.layers.Dense(100, activation='tanh')
         self.jumps_dense2 = tf.keras.layers.Dense(100, activation='tanh')
         self.jumps_dense3 = tf.keras.layers.Dense(100, activation=None)
@@ -298,10 +299,10 @@ class jump_ode(tf.keras.Model):
         jumps = self.jumps_dense2(jump1)
         jumps = self.jumps_dense3(jumps) + jump1
         jumps = tf.keras.activations.relu(jumps)
-        jumps = self.diff_output(jumps)
+        jumps = self.jumps_output(jumps)
 
-        logits = jumps[:, :self.dim*self.jumpdim] # first jumpdim outputs = logits
-        jumps = jumps[:, self.dim*self.jumpdim:]  # next (jumpdim - 1) outputs = jump sizes
+        logits = jumps[:, :self.dim*self.jumpdim] # (for each dim) first jumpdim outputs = logits
+        jumps = jumps[:, self.dim*self.jumpdim:]  # (for each dim) next (jumpdim - 1) outputs = jump sizes
         return logits, jumps
 
     @tf.function
@@ -315,7 +316,17 @@ class jump_ode(tf.keras.Model):
         return self.loss_fn(true, pred, sample_weight=sample_weight) - entropy*sample_weight*self.p
 
     @tf.function
-    def step_forward(self, curstate, t):
+    def step(self, curstate, t, use_y=None):
+        """
+        The equivalent of both the h_i and p_i(y_i) function.
+            curstate: shape (pastlen, batch size, dimension). current measurements + history
+                (curstate is equivalent to x_{i-1})
+            t: time index of prediction
+            use_y: if None, we sample y according to p_i(y_i), and return x_i, entropy, y. If use_y=y,
+                then we return x_i, entropy, \log p_i(y).
+                use_y=None is used in the forward pass and we keep y in memory. Reverse pass uses
+                use_y=y so that we can calculate the relevant vjp.
+        """
         batch_size, dim_maybe_with_t = tf.shape(curstate)[1], tf.shape(curstate)[2]
         last_curstate = curstate[-1][:,:self.dim]  # most recent measurements
         curstate = tf.transpose(curstate, [1,0,2])
@@ -329,53 +340,120 @@ class jump_ode(tf.keras.Model):
         logits = tf.reshape(logits, (batch_size*self.dim, self.jumpdim))
 
         # sample y, which represents which jump category we take
-        y = tf.reshape(tf.random.categorical(logits, 1, dtype=tf.int32), (batch_size, self.dim))
-        # select corresponding jump from y
-        ind0 = tf.repeat(tf.range(batch_size), [self.dim])
-        ind1 = tf.tile(tf.range(self.dim), [batch_size])
-        jumps = tf.gather_nd(jumps, tf.stack([ind0, ind1, y], axis=1))
+        if use_y==None:
+            y = tf.reshape(tf.random.categorical(logits, 1, dtype=tf.int32), (batch_size*self.dim,))
+        else:
+            y = use_y
+        # select corresponding jumps from y
+        inds = tf.stack([tf.repeat(tf.range(batch_size), [self.dim]),
+                         tf.tile(tf.range(self.dim), [batch_size]), y], axis=1)
+        jumps = tf.gather_nd(jumps, inds)
         jumps = tf.reshape(jumps, (batch_size, self.dim))
 
+        # the next state
         out = self.add_periodic_input_to_curstate(
-            last_curstate + drift + jumps)
+            last_curstate + drift + jumps, t)
 
+        # make probabilities/entropy
         probs = tf.exp(logits)
-        probs = probs/tf.reshape(tf.reduce_sum(probs, axis=1), (batch_size*self.dim, 1))
-        probs = tf.reshape(probs, (batch_size, self.dim, self.jumpdim))
-        entropy = tf.reduce_mean(tf.reduce_sum(probs*tf.math.log(probs),axis=2))
+        probs = probs/tf.reshape(tf.reduce_sum(probs, axis=1), (batch_size*self.dim, 1))  # normmalize
+        # return entropy averaged over each dimension, each batch
+        entropy = tf.reshape(probs, (batch_size, self.dim, self.jumpdim))
+        entropy = tf.reduce_mean(tf.reduce_sum(entropy*tf.math.log(entropy),axis=2))
 
-        return out, entropy, y
+        if use_y: # forward pass
+            return out, entropy, y
+        else:  # reverse
+            # create log probability of the jumps corresponding to y
+            probs = tf.math.log(probs)
+            probs = tf.gather_nd(probs, inds)
+            probs = tf.reduce_sum(probs)
+            return out, entropy, probs
 
-
-    def solve(self, init_state, ntimesteps, yhat=None, start=0):
+    def solve(self, init_state, ntimesteps, true=None, start=0):
+        """
+        Inputs:
+            init_state: list of tensors, each tensor has shape (batch size, dimension), list has shape
+                (ntimesteps, batch_size, dimension). init_state are the initial conditions for process.
+            ntimesteps: integer number of timesteps
+            true: target. list of tensors, in shape of (ntimesteps, batch size, dimension)
+            start: time index of first prediction (init_state[-1]+1). Assumed same for entire batch.
+        Returns:
+            objective value calculated from self.loss (when yhat is not None)
+        """
         batch_size = tf.shape(init_state)[1]
         self.curstate = init_state
 
         self.mem = []  # list of measurements, each measurement has shape (batch size, dimension)
         self.mem.extend(init_state)
-        self.ymem = []  # list of jump choices, each choice has shape (batch size, dimension) and corresponds
+        self.ymem = []  # list of jump choices, each choice has shape (batch size*dimension,) and corresponds
         # to the index of the selected jump
         self.jumps_zero_pad = tf.zeros((batch_size, self.dim, 1))
 
-        obj = [] if yhat is not None else None
+        obj = [] if true is not None else None
         sample_weight = tf.cast(1/ntimesteps, tf.float32)
 
         for i in range(ntimesteps):
-            nextstate, entropy, y = self.step_forward(
+            nextstate, entropy, y = self.step(
                 self.curstate, tf.convert_to_tensor(start+i, dtype=tf.float32))
-            if yhat is not None:
-                obj.append(self.loss(nextstate, yhat[i], entropy, sample_weight=sample_weight))
+            if true is not None:
+                obj.append(self.loss(nextstate, true[i], entropy, sample_weight=sample_weight))
 
             self.mem.append(nextstate)
             self.ymem.append(y)
 
             self.curstate = self.mem[-self.pastlen:]
 
-        if yhat is not None:
+        if true is not None:
             obj = tf.math.cumsum(obj, reverse=True)
         return obj
 
+    def grad(self, init_state, ntimesteps, true, start=0, return_obj=True):
+        """Calculates objective value and gradient."""
 
+        # forward pass
+        obj = self.solve(init_state, ntimesteps, true=true, start=start)
 
+        # reverse pass
+        pastlen = self.pastlen
+        sample_weight = tf.cast(1/ntimesteps, tf.float32)
+        ghat = [0 for i in range(len(self.trainable_variables))] # initialize gradient
+        lam = [[0, 0, obj[-(i+1)]] for i in reversed(range(pastlen+1))]  # initialize adjoint variables
+        # lam[-1] stores the current adjoint variable; lam[:-1] accumulates terms from pastlen
+        # Note that lambda_i needs to have the same shape as step when use_y = y
 
+        for i in reversed(range(ntimesteps)):
+            xim1 = self.mem[i:i+pastlen]
+            yi = self.ymem[i]
+            truei = true[i]
 
+            with tf.GradientTape() as g:
+                g.watch(xim1)
+                xi_and_extra =  self.step(xim1, tf.convert_to_tensor(start+i, dtype=tf.float32), use_y=yi)
+            xi, entropy = xi_and_extra[0], xi_and_extra[1]
+            with tf.GradientTape() as gg:
+                gg.watch([xi, entropy])
+                f = self.loss(xi, truei, entropy, sample_weight=sample_weight)
+            dfdx = gg.gradient(f, [xi, entropy])
+            lam[-1][0] += dfdx[0]
+            lam[1][1] += dfdx[1]
+            vjp = g.gradient(xi_and_extra, [xim1, self.trainable_variables], output_gradients=lam[-1])
+
+            # update gradient
+            for j in range(len(ghat)):
+                ghat[j] += vjp[1][j]
+            # update adjoint variables
+            if i > 0:
+                lam.pop(-1)
+                for j in range(pastlen):
+                    lam[j][0] += vjp[0][j]
+                lam.insert(0, [0, 0, obj[i-1]])
+
+        # add l2 regularization
+        for j in range(len(ghat)):
+            ghat[j] += self.l2*self.trainable_variables[j]
+
+        if return_obj:
+            return obj[0], ghat
+        else:
+            return ghat
