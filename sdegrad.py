@@ -1,6 +1,7 @@
 
 import tensorflow as tf
 import tensorflow_probability as tfp
+import numpy as np
 
 class sde(tf.keras.Model):
     """pathwise derivative implementation of nonlinear SDE using Euler-Maruyama discretization"""
@@ -245,7 +246,7 @@ class sde_mle(sde):
 
 class jump_ode(tf.keras.Model):
     """ODE with discrete jumps."""
-    def __init__(self, dim, jumpdim, pastlen=1, delta=.5, l2=.01, p=1e-4):
+    def __init__(self, dim, jumpdim, pastlen=1, delta=.5, l2=.01, p=0):
         """
             dim: dimension of ODE. Does not include any dimensions corresponding to periodic inputs.
                 e.g. Dimension is 10, problem has periodicity in days, so there are 2 extra dimensions
@@ -284,6 +285,9 @@ class jump_ode(tf.keras.Model):
         self.loss_fn = tf.keras.losses.Huber(delta=delta)
         self.l2 = tf.cast(l2, tf.float32)
         self.p = tf.cast(p, tf.float32)
+        
+        # simple baseline
+        self.baseline = SimpleBaseline()
 
     @tf.function
     def drift(self, curstate):
@@ -409,12 +413,15 @@ class jump_ode(tf.keras.Model):
 
         # forward pass
         obj = self.solve(init_state, ntimesteps, true=true, start=start)
+        
+        self.baseline.update(obj)
 
         # reverse pass
         pastlen = self.pastlen
         sample_weight = tf.cast(1/ntimesteps, tf.float32)
         ghat = [0 for i in range(len(self.trainable_variables))] # initialize gradient
-        lam = [[0, 0, obj[max(i, 0)]] for i in range(ntimesteps-1-pastlen,ntimesteps)]  # initialize adjoint variables
+        lam = [[0, 0, obj[max(i, 0)] - self.baseline(max(i,0), ntimesteps)] 
+               for i in range(ntimesteps-1-pastlen,ntimesteps)]  # initialize adjoint variables
         # lam[-1] stores the current adjoint variable; lam[:-1] accumulates terms from pastlen
         # Note that lambda_i needs to have the same shape as step when use_y = y
 
@@ -443,7 +450,8 @@ class jump_ode(tf.keras.Model):
                 lam.pop(-1)
                 for j in range(pastlen):
                     lam[j][0] += vjp[0][j]
-                lam.insert(0, [0, 0, obj[max(i-1-pastlen,0)]])
+                lam.insert(0, [0, 0, obj[max(i-1-pastlen,0)] 
+                               - self.baseline(max(i-1-pastlen,0), ntimesteps)])
 
         # add l2 regularization
         for j in range(len(ghat)):
@@ -453,3 +461,45 @@ class jump_ode(tf.keras.Model):
             return obj[0], ghat
         else:
             return ghat
+        
+        
+class SimpleBaseline:
+    """Simple Baseline with no parameters. 
+    
+    Assumes that loss is summable, i.e. objective = \sum_{i=1}^n f_i(x_i) 
+    """
+    def __init__(self, alpha=.02):
+        """alpha = decay of exponential moving average (higher = faster decay)"""
+        self.baseline = np.zeros((0,))
+        self.alpha = alpha
+        
+    def __call__(self, ind, ntimesteps):
+        """
+            ind: index of of current requested baseline (must be less than ntimesteps)
+            ntimesteps: number of total timesteps in current forward solve
+        """
+        return self.baseline[ind-ntimesteps]
+    
+    def update(self, obj):
+        """Update constant baseline with new objective values.
+        obj must be a python list of the cumulative sums of losses.
+        """
+        obj = np.array(obj)
+        diff = len(obj) - len(self.baseline)
+        if diff > 0:
+            if len(self.baseline) > 0:
+                self.baseline = self.alpha*obj[diff:] + (1-self.alpha)*self.baseline
+            self.baseline = np.concatenate((obj[:diff], self.baseline), axis=0)
+        elif diff < 0:
+            self.baseline[diff:] = self.alpha*obj + (1-self.alpha)*self.baseline[diff:]
+        else:
+            self.baseline = self.alpha*obj + (1-self.alpha)*self.baseline
+            
+class NoBaseline:
+    def __init__(self):
+        pass
+    def __call__(self, *args):
+        return 0
+    def update(self, *args):
+        pass
+        
