@@ -246,7 +246,7 @@ class sde_mle(sde):
 
 class jump_ode(tf.keras.Model):
     """ODE with discrete jumps."""
-    def __init__(self, dim, jumpdim, pastlen=1, delta=.5, l2=.01, p=0):
+    def __init__(self, dim, jumpdim, pastlen=1, delta=.5, l2=.01, p=1e-4):
         """
             dim: dimension of ODE. Does not include any dimensions corresponding to periodic inputs.
                 e.g. Dimension is 10, problem has periodicity in days, so there are 2 extra dimensions
@@ -287,7 +287,7 @@ class jump_ode(tf.keras.Model):
         self.p = tf.cast(p, tf.float32)
         
         # simple baseline
-        self.baseline = SimpleBaseline()
+        self.baseline = NoBaseline() #SimpleBaseline()
 
     @tf.function
     def drift(self, curstate):
