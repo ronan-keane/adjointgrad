@@ -286,6 +286,7 @@ class jump_ode(tf.keras.Model):
         self.jumps_output = tf.keras.layers.Dense(dim*(2*jumpdim-1), activation=None)
 
         self.loss_fn = tf.keras.losses.Huber(delta=delta)
+        self.loss_no_reduction = tf.keras.losses.Huber(delta=delta, reduction=tf.keras.losses.Reduction.NONE)
         self.l2 = tf.cast(l2, tf.float32)
         self.p = tf.cast(p, tf.float32)
 
@@ -318,12 +319,16 @@ class jump_ode(tf.keras.Model):
         """Curstate has shape (batch size, self.dim). t is current time index. Add time to curstate."""
         return curstate
 
-    @tf.function
-    def loss(self, pred, true, entropy, sample_weight=None):
-        """Returns loss for the current prediction, pred, with entropy maximization term."""
-        return self.loss_fn(true, pred, sample_weight=sample_weight) - entropy*sample_weight*self.p
+    # @tf.function
+    def loss(self, pred, true, l1, sample_weight=None):
+        """Returns loss for the current prediction, pred, with l1 maximization term."""
+        return self.loss_fn(true, pred, sample_weight=sample_weight) - tf.reduce_mean(l1)*sample_weight*self.p
 
-    @tf.function
+    # @tf.function
+    def loss_over_batch(self, pred, true, l1, sample_weight=None):  # Does not average over batch.
+        return self.loss_no_reduction(true, pred, sample_weight=sample_weight) - l1*sample_weight*self.p
+
+    # @tf.function
     def step(self, curstate, t, use_y=None):
         """
         The equivalent of both the h_i and p_i(y_i) function.
@@ -356,7 +361,7 @@ class jump_ode(tf.keras.Model):
         # l1 maximization term
         l1_expectation = (probs[:,:,1:1+self.njumps]*jumps[:,:,1:1+self.njumps]
                           + probs[:,:,1+self.njumps:]*tf.math.abs(jumps[:,:,1+self.njumps:]))
-        l1_expectation = tf.reduce_mean(tf.reduce_sum(l1_expectation, axis=2))
+        l1_expectation = tf.reduce_mean(tf.reduce_sum(l1_expectation, axis=2),axis=1)
 
         # sample y, which represents which jump category we take
         if use_y==None:
@@ -378,10 +383,11 @@ class jump_ode(tf.keras.Model):
             # create log probability of the jumps corresponding to y
             probs = tf.math.log(probs)
             probs = tf.gather_nd(probs, inds)
-            probs = tf.reduce_sum(probs)
+            probs = tf.reshape(probs, (batch_size, self.dim))
+            probs = tf.reduce_sum(probs, axis=1)
             return out, l1_expectation, probs
 
-    def solve(self, init_state, ntimesteps, true=None, start=0):
+    def solve(self, init_state, ntimesteps, true=None, start=0, loss_output='scalar'):
         """
         Inputs:
             init_state: list of tensors, each tensor has shape (batch size, dimension), list has shape
@@ -389,8 +395,11 @@ class jump_ode(tf.keras.Model):
             ntimesteps: integer number of timesteps
             true: target. list of tensors, in shape of (ntimesteps, batch size, dimension)
             start: time index of first prediction (init_state[-1]+1). Assumed same for entire batch.
+            loss_output: if 'scalar' returns mean loss value over batch. If 'batch', returns loss value for
+                each sample in batch.
         Returns:
-            objective value calculated from self.loss (when yhat is not None)
+            cumulative objective values (when true is not None). Shape is (ntimesteps,) if loss_output='scalar'
+            otherwise shape is (batch_size, ntimesteps)
         """
         batch_size = tf.shape(init_state)[1]
         self.curstate = init_state
@@ -404,13 +413,14 @@ class jump_ode(tf.keras.Model):
                          tf.tile(tf.range(self.dim), [batch_size])], axis=1)
 
         obj = [] if true is not None else None
+        loss = self.loss if loss_output=='scalar' else self.loss_over_batch
         sample_weight = tf.cast(1/ntimesteps, tf.float32)
 
         for i in range(ntimesteps):
-            nextstate, entropy, y = self.step(
+            nextstate, l1, y = self.step(
                 self.curstate, tf.convert_to_tensor(start+i, dtype=tf.float32))
             if true is not None:
-                obj.append(self.loss(nextstate, true[i], entropy, sample_weight=sample_weight))
+                obj.append(loss(nextstate, true[i], l1, sample_weight=sample_weight))
 
             self.mem.append(nextstate)
             self.ymem.append(y)
@@ -418,14 +428,16 @@ class jump_ode(tf.keras.Model):
             self.curstate = self.mem[-self.pastlen:]
 
         if true is not None:
-            obj = tf.math.cumsum(obj, reverse=True)
+            if loss_output !='scalar':
+                obj = tf.stack(obj, axis=1)
+            obj = tf.math.cumsum(obj, reverse=True, axis=-1)
         return obj
 
     def grad(self, init_state, ntimesteps, true, start=0, return_obj=True):
         """Calculates objective value and gradient."""
 
         # forward pass
-        obj = self.solve(init_state, ntimesteps, true=true, start=start)
+        obj = self.solve(init_state, ntimesteps, true=true, start=start, loss_output='batch')
 
         self.baseline.update(obj)
 
@@ -433,8 +445,7 @@ class jump_ode(tf.keras.Model):
         pastlen = self.pastlen
         sample_weight = tf.cast(1/ntimesteps, tf.float32)
         ghat = [0 for i in range(len(self.trainable_variables))] # initialize gradient
-        lam = [[0, 0, obj[max(i, 0)] - self.baseline(max(i,0), ntimesteps)]
-               for i in range(ntimesteps-1-pastlen,ntimesteps)]  # initialize adjoint variables
+        lam = [self.init_lambda(i, ntimesteps, obj) for i in range(ntimesteps-1-pastlen,ntimesteps)]
         # lam[-1] stores the current adjoint variable; lam[:-1] accumulates terms from pastlen
         # Note that lambda_i needs to have the same shape as step when use_y = y
 
@@ -446,11 +457,11 @@ class jump_ode(tf.keras.Model):
             with tf.GradientTape() as g:
                 g.watch(xim1)
                 xi_and_extra =  self.step(xim1, tf.convert_to_tensor(start+i, dtype=tf.float32), use_y=yi)
-            xi, entropy = xi_and_extra[0], xi_and_extra[1]
+            xi, l1 = xi_and_extra[0], xi_and_extra[1]
             with tf.GradientTape() as gg:
-                gg.watch([xi, entropy])
-                f = self.loss(xi, truei, entropy, sample_weight=sample_weight)
-            dfdx = gg.gradient(f, [xi, entropy])
+                gg.watch([xi, l1])
+                f = self.loss(xi, truei, l1, sample_weight=sample_weight)
+            dfdx = gg.gradient(f, [xi, l1])
             lam[-1][0] += dfdx[0]
             lam[-1][1] += dfdx[1]
             vjp = g.gradient(xi_and_extra, [xim1, self.trainable_variables], output_gradients=lam[-1])
@@ -463,17 +474,23 @@ class jump_ode(tf.keras.Model):
                 lam.pop(-1)
                 for j in range(pastlen):
                     lam[j][0] += vjp[0][j]
-                lam.insert(0, [0, 0, obj[max(i-1-pastlen,0)]
-                               - self.baseline(max(i-1-pastlen,0), ntimesteps)])
+                lam.insert(0, self.init_lambda(i-1-pastlen, ntimesteps, obj))
 
         # add l2 regularization
         for j in range(len(ghat)):
             ghat[j] += self.l2*self.trainable_variables[j]
 
         if return_obj:
-            return obj[0], ghat
+            return tf.reduce_mean(obj[:,0]), ghat
         else:
             return ghat
+
+    def init_lambda(self, ind, ntimesteps, obj):
+        """Initialize lambda_{ind}."""
+        ind = max(ind, 0)
+        batch_size = tf.shape(obj)[0]
+        baselines = tf.repeat(self.baseline(ind, ntimesteps), batch_size)
+        return [0, 0, obj[:,ind] - baselines]
 
 
 class SimpleBaseline:
@@ -495,9 +512,9 @@ class SimpleBaseline:
 
     def update(self, obj):
         """Update constant baseline with new objective values.
-        obj must be a python list of the cumulative sums of losses.
+        obj should be a tensor with shape (batch size, ntimesteps)
         """
-        obj = np.array(obj)
+        obj = tf.reduce_mean(obj,axis=0).numpy()
         diff = len(obj) - len(self.baseline)
         if diff > 0:
             if len(self.baseline) > 0:
