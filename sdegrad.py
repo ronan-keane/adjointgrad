@@ -246,19 +246,20 @@ class sde_mle(sde):
 
 class jump_ode(tf.keras.Model):
     """ODE with discrete jumps."""
-    def __init__(self, dim, jumpdim, pastlen=1, delta=.5, l2=.01, p=1e-4):
+    def __init__(self, dim, jumpdim, pastlen=1, delta=.5, l2=.01, p=3e-4):
         """
             dim: dimension of ODE. Does not include any dimensions corresponding to periodic inputs.
                 e.g. Dimension is 10, problem has periodicity in days, so there are 2 extra dimensions
                 corresponding to this periodicity. We predict 10 values every timestep, then add the 2
                 extra time dimensions. self.dim = 10, but there are 12 entries in each prediction.
                 periodic inputs are controled by add_periodic_inputs_to_curstate
-            jumpdim: discrete choices for jumps. Must be at least 2. At every timestep, there are jumpdim
-                possibilities for what the jump will be, and one the possibilities is no jump.
+            jumpdim: discrete choices for jumps. Must be odd and at least 3. At every timestep, there are
+                (jumpdim-1)/2 possibilities for what the positive jump will be, likewise for negative jumps,
+                and the last possibility is no jump.
             pastlen: number of past timesteps used to calculate next step (1 uses current timestep only)
             delta: for Huber loss https://www.tensorflow.org/api_docs/python/tf/keras/losses/Huber
             l2: strength of l2 regularization (l2*self.trainable_variables is added to gradient)
-            p: weight of entropy maximization term.
+            p: weight of L1 maximization term.
         """
         super().__init__()
         assert type(dim) == int
@@ -266,10 +267,12 @@ class jump_ode(tf.keras.Model):
         assert type(pastlen) == int
         assert dim>0
         assert jumpdim > 1
+        assert jumpdim % 2 == 1
         assert pastlen >0
         self.dim = dim
         self.jumpdim = jumpdim
         self.pastlen = pastlen
+        self.njumps = (self.jumpdim-1)//2  # number of possibilities for each of positive, negative jumps
 
         # drift architecture
         self.drift_dense1 = tf.keras.layers.Dense(100, activation='tanh')
@@ -277,17 +280,17 @@ class jump_ode(tf.keras.Model):
         self.drift_dense3 = tf.keras.layers.Dense(100, activation=None)
         self.drift_output = tf.keras.layers.Dense(dim, activation=None)
         # jumps architecture
-        self.logits_dense1 = tf.keras.layers.Dense(100, activation='relu')
-        self.logits_output = tf.keras.layers.Dense(dim*jumpdim, activation=None)
-        self.jumps_dense1 = tf.keras.layers.Dense(100, activation='relu')
-        self.jumps_output = tf.keras.layers.Dense(dim*(jumpdim-1), activation=None)
+        self.jumps_dense1 = tf.keras.layers.Dense(100, activation='tanh')
+        self.jumps_dense2 = tf.keras.layers.Dense(100, activation='tanh')
+        self.jumps_dense3 = tf.keras.layers.Dense(100, activation=None)
+        self.jumps_output = tf.keras.layers.Dense(dim*(2*jumpdim-1), activation=None)
 
         self.loss_fn = tf.keras.losses.Huber(delta=delta)
         self.l2 = tf.cast(l2, tf.float32)
         self.p = tf.cast(p, tf.float32)
-        
+
         # simple baseline
-        self.baseline = NoBaseline() #SimpleBaseline()
+        self.baseline = SimpleBaseline()
 
     @tf.function
     def drift(self, curstate):
@@ -299,11 +302,16 @@ class jump_ode(tf.keras.Model):
 
     @tf.function
     def jumps(self, curstate):
-        logits = self.logits_dense1(curstate)
-        logits = self.logits_output(logits)
-        jumps = self.jumps_dense1(curstate)
-        jumps = self.jumps_output(jumps)
-        return logits, jumps
+        jump1 = self.jumps_dense1(curstate)
+        jumps = self.jumps_dense2(jump1)
+        jumps = self.jumps_dense3(jumps) + jump1
+        jumps = tf.keras.activations.relu(jumps)
+        jumps = self.jumps_output(jumps)  # output logits and jump magnitudes
+
+        logits = jumps[:, :self.dim*self.jumpdim]
+        posjumps = tf.math.exp(jumps[:, self.dim*self.jumpdim:self.dim*(self.jumpdim+self.njumps)])
+        negjumps = -tf.math.exp(jumps[:, self.dim*(self.jumpdim+self.njumps):])
+        return logits, posjumps, negjumps
 
     @tf.function
     def add_periodic_input_to_curstate(self, curstate, t):
@@ -334,19 +342,29 @@ class jump_ode(tf.keras.Model):
 
         # call to model
         drift = self.drift(curstate)
-        logits, jumps = self.jumps(curstate)
-        jumps = tf.reshape(jumps, (batch_size, self.dim, self.jumpdim-1))
-        jumps = tf.concat([self.jumps_zero_pad, jumps], axis=2)
+        logits, posjumps, negjumps = self.jumps(curstate)
+        # reshaping logits/jumps
         logits = tf.reshape(logits, (batch_size*self.dim, self.jumpdim))
+        posjumps = tf.reshape(posjumps, (batch_size, self.dim, self.njumps))
+        negjumps = tf.reshape(negjumps, (batch_size, self.dim, self.njumps))
+        jumps = tf.concat([self.jumps_zero_pad, posjumps, negjumps], axis=2)
+        # make probabilities
+        probs = tf.exp(logits)
+        probs = probs/tf.reshape(tf.reduce_sum(probs, axis=1), (batch_size*self.dim, 1))  # normmalize
+        probs = tf.reshape(probs, (batch_size, self.dim, self.jumpdim))
+
+        # l1 maximization term
+        l1_expectation = (probs[:,:,1:1+self.njumps]*jumps[:,:,1:1+self.njumps]
+                          + probs[:,:,1+self.njumps:]*tf.math.abs(jumps[:,:,1+self.njumps:]))
+        l1_expectation = tf.reduce_mean(tf.reduce_sum(l1_expectation, axis=2))
 
         # sample y, which represents which jump category we take
         if use_y==None:
-            y = tf.reshape(tf.random.categorical(logits, 1, dtype=tf.int32), (batch_size*self.dim,))
+            y = tf.random.categorical(logits, 1, dtype=tf.int32)
         else:
             y = use_y
         # select corresponding jumps from y
-        inds = tf.stack([tf.repeat(tf.range(batch_size), [self.dim]),
-                         tf.tile(tf.range(self.dim), [batch_size]), y], axis=1)
+        inds = tf.concat([self.jumps_ind_pad, y], axis=1)
         jumps = tf.gather_nd(jumps, inds)
         jumps = tf.reshape(jumps, (batch_size, self.dim))
 
@@ -354,21 +372,14 @@ class jump_ode(tf.keras.Model):
         out = self.add_periodic_input_to_curstate(
             last_curstate + drift + jumps, t)
 
-        # make probabilities/entropy
-        probs = tf.exp(logits)
-        probs = probs/tf.reshape(tf.reduce_sum(probs, axis=1), (batch_size*self.dim, 1))  # normmalize
-        probs = tf.reshape(probs, (batch_size, self.dim, self.jumpdim))
-        # return entropy averaged over each dimension, each batch
-        entropy = tf.reduce_mean(tf.reduce_sum(probs*tf.math.log(probs),axis=2))
-
         if use_y==None: # forward pass
-            return out, entropy, y
+            return out, l1_expectation, y
         else:  # reverse
             # create log probability of the jumps corresponding to y
             probs = tf.math.log(probs)
             probs = tf.gather_nd(probs, inds)
             probs = tf.reduce_sum(probs)
-            return out, entropy, probs
+            return out, l1_expectation, probs
 
     def solve(self, init_state, ntimesteps, true=None, start=0):
         """
@@ -386,9 +397,11 @@ class jump_ode(tf.keras.Model):
 
         self.mem = []  # list of measurements, each measurement has shape (batch size, dimension)
         self.mem.extend(init_state)
-        self.ymem = []  # list of jump choices, each choice has shape (batch size*dimension,) and corresponds
+        self.ymem = []  # list of jump choices, each choice has shape (batch size*dimension,1) and corresponds
         # to the index of the selected jump
         self.jumps_zero_pad = tf.zeros((batch_size, self.dim, 1))
+        self.jumps_ind_pad = tf.stack([tf.repeat(tf.range(batch_size), [self.dim]),
+                         tf.tile(tf.range(self.dim), [batch_size])], axis=1)
 
         obj = [] if true is not None else None
         sample_weight = tf.cast(1/ntimesteps, tf.float32)
@@ -413,14 +426,14 @@ class jump_ode(tf.keras.Model):
 
         # forward pass
         obj = self.solve(init_state, ntimesteps, true=true, start=start)
-        
+
         self.baseline.update(obj)
 
         # reverse pass
         pastlen = self.pastlen
         sample_weight = tf.cast(1/ntimesteps, tf.float32)
         ghat = [0 for i in range(len(self.trainable_variables))] # initialize gradient
-        lam = [[0, 0, obj[max(i, 0)] - self.baseline(max(i,0), ntimesteps)] 
+        lam = [[0, 0, obj[max(i, 0)] - self.baseline(max(i,0), ntimesteps)]
                for i in range(ntimesteps-1-pastlen,ntimesteps)]  # initialize adjoint variables
         # lam[-1] stores the current adjoint variable; lam[:-1] accumulates terms from pastlen
         # Note that lambda_i needs to have the same shape as step when use_y = y
@@ -450,7 +463,7 @@ class jump_ode(tf.keras.Model):
                 lam.pop(-1)
                 for j in range(pastlen):
                     lam[j][0] += vjp[0][j]
-                lam.insert(0, [0, 0, obj[max(i-1-pastlen,0)] 
+                lam.insert(0, [0, 0, obj[max(i-1-pastlen,0)]
                                - self.baseline(max(i-1-pastlen,0), ntimesteps)])
 
         # add l2 regularization
@@ -461,25 +474,25 @@ class jump_ode(tf.keras.Model):
             return obj[0], ghat
         else:
             return ghat
-        
-        
+
+
 class SimpleBaseline:
-    """Simple Baseline with no parameters. 
-    
-    Assumes that loss is summable, i.e. objective = \sum_{i=1}^n f_i(x_i) 
+    """Simple Baseline with no parameters.
+
+    Assumes that loss is summable, i.e. objective = \sum_{i=1}^n f_i(x_i)
     """
     def __init__(self, alpha=.02):
         """alpha = decay of exponential moving average (higher = faster decay)"""
         self.baseline = np.zeros((0,))
         self.alpha = alpha
-        
+
     def __call__(self, ind, ntimesteps):
         """
             ind: index of of current requested baseline (must be less than ntimesteps)
             ntimesteps: number of total timesteps in current forward solve
         """
         return self.baseline[ind-ntimesteps]
-    
+
     def update(self, obj):
         """Update constant baseline with new objective values.
         obj must be a python list of the cumulative sums of losses.
@@ -494,7 +507,7 @@ class SimpleBaseline:
             self.baseline[diff:] = self.alpha*obj + (1-self.alpha)*self.baseline[diff:]
         else:
             self.baseline = self.alpha*obj + (1-self.alpha)*self.baseline
-            
+
 class NoBaseline:
     def __init__(self):
         pass
@@ -502,4 +515,4 @@ class NoBaseline:
         return 0
     def update(self, *args):
         pass
-        
+
