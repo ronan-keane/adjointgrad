@@ -39,9 +39,9 @@ test = tf.convert_to_tensor(test, dtype=tf.float32)
 
 #%% make model
 
-# class mysde(sde):
-# class mysde(sde_mle):
-class mysde(jump_ode):
+# class mysde(sde): #use p =1e-4, l2=.01
+class mysde(sde_mle):
+# class mysde(jump_ode):
     # Just the sde class, with periodicity added
     @tf.function
     def add_periodic_input_to_curstate(self, curstate, t):
@@ -53,24 +53,28 @@ class mysde(jump_ode):
         return tf.concat([curstate, temp],1)
 
 
-model = mysde(20, 3, pastlen=12, p=1e-4)
+model = mysde(20, pastlen=12, l2=.005)
 
 #%% training
 # used for huber loss
 # batch_size_list = [8, 8, 8, 8, 8]
-# learning_rate_list = [1e-4, 1e-4, 5e-5, 1e-5, 1e-6]
+# learning_rate_list = [1e-4, 1e-4, 5e-5, 1e-5, 5e-6]
 # prediction_length_list = [12, 24, 48, 96, 192]  # 3 hours up to 2 days
 # nbatches_list = [2000, 2000, 2000, 2000, 2000]
 # for mle loss
 # batch_size_list = [8, 8, 8, 8, 8, 8, 8]
-# learning_rate_list = [1e-4, 1e-3, 1e-4, 5e-5, 1e-5, 5e-6, 1e-6]
+# learning_rate_list = [1e-4, 1e-3, 1e-4, 5e-5, 1e-5, 1e-5, 1e-5]
 # prediction_length_list = [12, 12, 12, 24, 48, 96, 192]  # 3 hours up to 2 days
-# nbatches_list = [2000, 2000, 2000, 2000, 2000, 2000]
+# nbatches_list = [2000, 2000, 2000, 2000, 2000, 2000, 2000]
+batch_size_list = [8, 8, 8, 8, 8, 8, 8, 8]
+learning_rate_list = [1e-4, 1e-3, 1e-4, 1e-3, 1e-4, 1e-4, 1e-5, 5e-6]
+prediction_length_list = [3, 6, 12, 24, 48, 96, 192, 192]  # 3 hours up to 2 days
+nbatches_list = [5000, 5000, 5000, 5000, 5000, 2000, 2000, 2000]
 # for jump_ode
-batch_size_list = [8, 8, 8, 8, 8]
-learning_rate_list = [1e-4, 1e-4, 1e-4, 1e-4, 1e-4]
-prediction_length_list = [12, 24, 48, 96, 192]  # 3 hours up to 2 days
-nbatches_list = [2000, 2000, 2000, 2000, 2000]
+# batch_size_list = [1, 1, 1, 1, 1]
+# learning_rate_list = [5e-5, 1e-5, 1e-5, 1e-5, 1e-5]
+# prediction_length_list = [12, 24, 48, 96, 192]  # 3 hours up to 2 days
+# nbatches_list = [5000, 5000, 5000, 5000, 5000]
 
 assert len(batch_size_list) == len(learning_rate_list) == len(prediction_length_list) == len(nbatches_list)
 
@@ -143,20 +147,26 @@ mean = np.mean(x,axis=1)
 std = np.std(x,axis=1)
 t = list(range(ind+len(train), ind+len(train)+prediction_length))
 
-plt.figure(figsize=(10,8))
+input_t = list(range(ind-model.pastlen+len(train), ind+len(train)))
+input_y = [init_state[i][0,customer] for i in range(model.pastlen)]
+
+plt.figure(figsize=(13,8))
 frame = plt.gca()
 plt.plot(t, y1, 'C0')
 plt.fill_between(t, mean-std, mean+std, alpha=.3, facecolor='C2')
 plt.plot(t, base_y, 'C1')
 plt.plot(t, x[:,0], 'C2', alpha=.3)
-frame.axes.get_xaxis().set_visible(False)
+plt.plot(input_t, input_y, 'C3')
+frame.tick_params(bottom=False)
+frame.axes.xaxis.set_ticks([])
 plt.ylabel('normalized demand')
 plt.xlabel('time (7 days total)')
 
 legend_elements = [Line2D([0], [0], color='C0', label='ground truth'),
                    Patch(facecolor='C2', alpha=.3, label='Huber SDE mean '+u'\u00b1'+' std dev'),
                    Line2D([0], [0], color = 'C2', alpha=.3, label = 'Huber SDE example prediction'),
-                   Line2D([0], [0], color='C1', label = 'historical average')]
+                   Line2D([0], [0], color='C1', label = 'historical average'),
+                   Line2D([0], [0], color='C3', label = 'Input')]
 
 frame.legend(handles=legend_elements)
 

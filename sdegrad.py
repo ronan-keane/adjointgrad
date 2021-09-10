@@ -5,7 +5,7 @@ import numpy as np
 
 class sde(tf.keras.Model):
     """pathwise derivative implementation of nonlinear SDE using Euler-Maruyama discretization"""
-    def __init__(self, dim, pastlen=1, delta=.5, l2=.01, p=3e-4):
+    def __init__(self, dim, pastlen=1, delta=.5, l2=.01, p=1e-4):
         """
             dim: dimension of SDE. Does not include any dimensions corresponding to periodic inputs.
                 e.g. Dimension is 10, problem has periodicity in days, so there are 2 extra dimensions
@@ -106,7 +106,6 @@ class sde(tf.keras.Model):
         drift1 = self.drift_dense1(curstate)
         drift = self.drift_dense2(drift1)
         drift = self.drift_dense3(drift) + drift1
-        # drift = self.drift_dense3(drift + drift1)  # saved weights correspond to this typo
         drift = tf.keras.activations.relu(drift)
         return self.drift_output(drift)
 
@@ -115,7 +114,6 @@ class sde(tf.keras.Model):
         diff1 = self.diff_dense1(curstate)
         diff = self.diff_dense2(diff1)
         diff = self.diff_dense3(diff) + diff1
-        # diff = self.diff_dense3(diff + diff1)  # saved weights correspond to this typo
         diff = tf.keras.activations.relu(diff)
         diff = self.diff_output(diff)
         diff = tfp.math.fill_triangular(diff)
@@ -217,7 +215,7 @@ class sde_mle(sde):
         return out, mu, diff
 
     def init_lambda(self):
-        if hasattr(self, 'lambda_x_init'):
+        if hasattr(self, 'lambda_x_init') and tf.shape(self.lambda_x_init)[0] == tf.shape(self.mem[0])[0]:
             return [self.lambda_x_init,0,0]  # step returns x_i, drift, diffusion, lambda needs same shape
         self.lambda_x_init = tf.zeros(tf.shape(self.mem[0]))
         return [self.lambda_x_init, 0, 0]
