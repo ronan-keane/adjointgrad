@@ -244,7 +244,7 @@ class sde_mle(sde):
 
 class jump_ode(tf.keras.Model):
     """ODE with discrete jumps."""
-    def __init__(self, dim, jumpdim, pastlen=1, delta=.5, l2=.01, p=1e-2):
+    def __init__(self, dim, jumpdim, pastlen=1, delta=.5, l2=.01):
         """
             dim: dimension of ODE. Does not include any dimensions corresponding to periodic inputs.
                 e.g. Dimension is 10, problem has periodicity in days, so there are 2 extra dimensions
@@ -257,7 +257,6 @@ class jump_ode(tf.keras.Model):
             pastlen: number of past timesteps used to calculate next step (1 uses current timestep only)
             delta: for Huber loss https://www.tensorflow.org/api_docs/python/tf/keras/losses/Huber
             l2: strength of l2 regularization (l2*self.trainable_variables is added to gradient)
-            p: weight of L1 maximization term.
         """
         super().__init__()
         assert type(dim) == int
@@ -286,7 +285,6 @@ class jump_ode(tf.keras.Model):
         self.loss_fn = tf.keras.losses.Huber(delta=delta)
         self.loss_no_reduction = tf.keras.losses.Huber(delta=delta, reduction=tf.keras.losses.Reduction.NONE)
         self.l2 = tf.cast(l2, tf.float32)
-        self.p = tf.cast(p, tf.float32)
 
         # simple baseline
         self.baseline = SimpleBaseline()
@@ -318,13 +316,13 @@ class jump_ode(tf.keras.Model):
         return curstate
 
     @tf.function
-    def loss(self, pred, true, l1, sample_weight=None):
+    def loss(self, pred, true, sample_weight=None):
         """Returns loss for the current prediction, pred, with l1 maximization term."""
-        return self.loss_fn(true, pred, sample_weight=sample_weight) - tf.reduce_mean(l1)*sample_weight*self.p
+        return self.loss_fn(true, pred, sample_weight=sample_weight)
 
     @tf.function
     def loss_over_batch(self, pred, true, l1, sample_weight=None):  # Does not average over batch.
-        return self.loss_no_reduction(true, pred, sample_weight=sample_weight) - l1*sample_weight*self.p
+        return self.loss_no_reduction(true, pred, sample_weight=sample_weight)
 
     @tf.function
     def step(self, curstate, t, use_y=None):
@@ -351,15 +349,6 @@ class jump_ode(tf.keras.Model):
         posjumps = tf.reshape(posjumps, (batch_size, self.dim, self.njumps))
         negjumps = tf.reshape(negjumps, (batch_size, self.dim, self.njumps))
         jumps = tf.concat([self.jumps_zero_pad, posjumps, negjumps], axis=2)
-        # make probabilities
-        probs = tf.exp(logits)
-        probs = probs/tf.reshape(tf.reduce_sum(probs, axis=1), (batch_size*self.dim, 1))  # normmalize
-        probs = tf.reshape(probs, (batch_size, self.dim, self.jumpdim))
-
-        # l1 maximization term
-        l1_expectation = (probs[:,:,1:1+self.njumps]*jumps[:,:,1:1+self.njumps]
-                          + probs[:,:,1+self.njumps:]*tf.math.abs(jumps[:,:,1+self.njumps:]))
-        l1_expectation = tf.reduce_mean(tf.reduce_sum(l1_expectation, axis=2),axis=1)
 
         # sample y, which represents which jump category we take
         if use_y==None:
@@ -376,14 +365,17 @@ class jump_ode(tf.keras.Model):
             last_curstate + drift + jumps, t)
 
         if use_y==None: # forward pass
-            return out, l1_expectation, y
+            return out, y
         else:  # reverse
             # create log probability of the jumps corresponding to y
+            probs = tf.exp(logits)
+            probs = probs/tf.reshape(tf.reduce_sum(probs, axis=1), (batch_size*self.dim, 1))  # normmalize
+            probs = tf.reshape(probs, (batch_size, self.dim, self.jumpdim))
             probs = tf.math.log(probs)
             probs = tf.gather_nd(probs, inds)
             probs = tf.reshape(probs, (batch_size, self.dim))
             probs = tf.reduce_sum(probs, axis=1)
-            return out, l1_expectation, probs
+            return out, probs
 
     def solve(self, init_state, ntimesteps, true=None, start=0, loss_output='scalar'):
         """
@@ -455,13 +447,12 @@ class jump_ode(tf.keras.Model):
             with tf.GradientTape() as g:
                 g.watch(xim1)
                 xi_and_extra =  self.step(xim1, tf.convert_to_tensor(start+i, dtype=tf.float32), use_y=yi)
-            xi, l1 = xi_and_extra[0], xi_and_extra[1]
+            xi = xi_and_extra[0]
             with tf.GradientTape() as gg:
-                gg.watch([xi, l1])
-                f = self.loss(xi, truei, l1, sample_weight=sample_weight)
-            dfdx = gg.gradient(f, [xi, l1])
+                gg.watch(xi)
+                f = self.loss(xi, truei, sample_weight=sample_weight)
+            dfdx = gg.gradient(f, xi)
             lam[-1][0] += dfdx[0]
-            lam[-1][1] += dfdx[1]
             vjp = g.gradient(xi_and_extra, [xim1, self.trainable_variables], output_gradients=lam[-1])
 
             # update gradient
@@ -488,7 +479,7 @@ class jump_ode(tf.keras.Model):
         ind = max(ind, 0)
         batch_size = tf.shape(obj)[0]
         baselines = tf.repeat(self.baseline(ind, ntimesteps), batch_size)
-        return [0, 0, obj[:,ind] - baselines]
+        return [0, obj[:,ind] - baselines]
 
 
 class SimpleBaseline:
