@@ -244,7 +244,7 @@ class sde_mle(sde):
 
 class jump_ode(tf.keras.Model):
     """ODE with discrete jumps."""
-    def __init__(self, dim, jumpdim, pastlen=1, delta=.5, l2=.01, p=3e-4):
+    def __init__(self, dim, jumpdim, pastlen=1, delta=.5, l2=.01, p=1e-2):
         """
             dim: dimension of ODE. Does not include any dimensions corresponding to periodic inputs.
                 e.g. Dimension is 10, problem has periodicity in days, so there are 2 extra dimensions
@@ -317,16 +317,16 @@ class jump_ode(tf.keras.Model):
         """Curstate has shape (batch size, self.dim). t is current time index. Add time to curstate."""
         return curstate
 
-    # @tf.function
+    @tf.function
     def loss(self, pred, true, l1, sample_weight=None):
         """Returns loss for the current prediction, pred, with l1 maximization term."""
         return self.loss_fn(true, pred, sample_weight=sample_weight) - tf.reduce_mean(l1)*sample_weight*self.p
 
-    # @tf.function
+    @tf.function
     def loss_over_batch(self, pred, true, l1, sample_weight=None):  # Does not average over batch.
         return self.loss_no_reduction(true, pred, sample_weight=sample_weight) - l1*sample_weight*self.p
 
-    # @tf.function
+    @tf.function
     def step(self, curstate, t, use_y=None):
         """
         The equivalent of both the h_i and p_i(y_i) function.
@@ -498,7 +498,7 @@ class SimpleBaseline:
     """
     def __init__(self, alpha=.02):
         """alpha = decay of exponential moving average (higher = faster decay)"""
-        self.baseline = np.zeros((0,))
+        self.baseline = np.zeros((0,), dtype=np.single)
         self.alpha = alpha
 
     def __call__(self, ind, ntimesteps):
