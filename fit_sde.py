@@ -39,8 +39,8 @@ test = tf.convert_to_tensor(test, dtype=tf.float32)
 
 #%% make model
 
-# class mysde(sde):
-class mysde(sde_mle):
+class mysde(sde):
+# class mysde(sde_mle):
 # class mysde(jump_ode):
     # Just the sde class, with periodicity added
     @tf.function
@@ -52,9 +52,9 @@ class mysde(sde_mle):
         return tf.concat([curstate, times],1)
 
 
-# model = mysde(20, pastlen=12, l2=.01, p=1e-4)  # parameters for huber loss
+model = mysde(20, pastlen=12, l2=.01, p=1e-4)  # parameters for huber loss
 # model = mysde(20, pastlen=12, l2=.005)  # for mle loss
-model = mysde(20, 3, pastlen=12, l2=.015)  # for jump_ode
+# model = mysde(20, 3, pastlen=12, l2=.015)  # for jump_ode
 
 
 #%% training loop
@@ -67,11 +67,11 @@ def training_loop(model, data, prediction_length, epochs, learning_rate, batch_s
     # randomly make batches for the requested number of epochs
     inds = list(range(model.pastlen, len(data)-prediction_length))  # possible indices of first prediction
     inds_list = []
-    for i in range(epochs//1):
+    for i in range(int(epochs)):
         random.shuffle(inds)
         inds_list.extend(inds)
     random.shuffle(inds)
-    inds_list.extend(inds[:int(len(inds)*(epochs-(epochs//1)))])
+    inds_list.extend(inds[:int(len(inds)*(epochs-int(epochs)))])
     average_obj = []
     for i in range(len(inds_list)//batch_size):  # for each batch
         inds = inds_list[i*batch_size:(i+1)*batch_size]  # starting indices for first prediction of current batch
@@ -96,52 +96,33 @@ def training_loop(model, data, prediction_length, epochs, learning_rate, batch_s
 
 #%% training
 # used for huber loss
-# batch_size_list = [8, 8, 8, 8, 8]
-# learning_rate_list = [1e-4, 1e-4, 5e-5, 1e-5, 5e-6]
-# prediction_length_list = [12, 24, 48, 96, 192]  # 3 hours up to 2 days
-# nbatches_list = [2000, 2000, 2000, 2000, 2000]
+training_loop(model, train, 12, .15, 1e-4, 8)
+training_loop(model, train, 24, .15, 1e-4, 8)
+training_loop(model, train, 48, .15, 5e-5, 8)
+training_loop(model, train, 96, .15, 1e-5, 8)
+training_loop(model, train, 192, .15, 5e-6, 8)
 
 # for mle loss
 # batch_size_list = [8, 8, 8, 8, 8, 8, 8]
 # learning_rate_list = [1e-4, 1e-3, 1e-4, 5e-5, 1e-5, 1e-5, 1e-5]
 # prediction_length_list = [12, 12, 12, 24, 48, 96, 192]  # 3 hours up to 2 days
 # nbatches_list = [2000, 2000, 2000, 2000, 2000, 2000, 2000]
-batch_size_list = [8, 8, 8, 8, 8, 8, 8, 8]
-learning_rate_list = [1e-4, 1e-3, 1e-4, 1e-3, 1e-4, 1e-4, 1e-5, 5e-6]
-prediction_length_list = [3, 6, 12, 24, 48, 96, 192, 192]  # 3 hours up to 2 days
-nbatches_list = [5000, 5000, 5000, 5000, 5000, 2000, 2000, 2000]
+
+# batch_size_list = [8, 8, 8, 8, 8, 8, 8, 8]
+# learning_rate_list = [1e-4, 1e-3, 1e-4, 1e-3, 1e-4, 1e-4, 1e-5, 5e-6]
+# prediction_length_list = [3, 6, 12, 24, 48, 96, 192, 192]  # 3 hours up to 2 days
+# nbatches_list = [5000, 5000, 5000, 5000, 5000, 2000, 2000, 2000]
 
 # for jump_ode
 # batch_size_list = [8, 8, 8, 8]
 # learning_rate_list = [1e-4, 1e-4, 1e-4, 1e-4]
 # prediction_length_list = [3, 6, 12, 24]  # 3 hours up to 2 days
 # nbatches_list = [2000, 2000, 2000, 2000]
-batch_size_list = [1, 1, 1, 1, 1]
-learning_rate_list = [1e-4, 1e-4, 5e-5, 1e-5, 1e-6]
-prediction_length_list = [12, 24, 48, 96, 192]  # 3 hours up to 2 days
-nbatches_list = [5000, 5000, 5000, 5000, 5000]
 
-assert len(batch_size_list) == len(learning_rate_list) == len(prediction_length_list) == len(nbatches_list)
-
-for j in range(len(batch_size_list)):
-    batch_size = batch_size_list[j]
-    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate_list[j])
-    prediction_length = prediction_length_list[j]
-    nbatches = nbatches_list[j]
-
-    for i in range(nbatches):
-        ind = int(np.random.rand()*(len(train)-model.pastlen-prediction_length))+model.pastlen  # index of first prediction
-        curdata = [tf.tile(train[j+ind-model.pastlen:j+ind-model.pastlen+1,:], [batch_size, 1]) for j in range(prediction_length+model.pastlen)]
-
-        init_state = curdata[:model.pastlen]
-        yhat = curdata[model.pastlen:]
-
-        obj, grad = model.grad(init_state, prediction_length, yhat, start=ind)
-        optimizer.apply_gradients(zip(grad, model.trainable_variables))
-
-        if i % 100 == 0:
-            print('objective value for batch '+str(i)+' is '+str(obj))
-
+# batch_size_list = [1, 1, 1, 1, 1]
+# learning_rate_list = [1e-4, 1e-4, 5e-5, 1e-5, 1e-6]
+# prediction_length_list = [12, 24, 48, 96, 192]  # 3 hours up to 2 days
+# nbatches_list = [5000, 5000, 5000, 5000, 5000]
 
 #%% make baseline model which uses average electric in that time at that day of the week
 period = 384
