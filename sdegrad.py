@@ -215,7 +215,7 @@ class sde_mle(sde):
         return out, mu, diff
 
     def init_lambda(self):
-        if hasattr(self, 'lambda_x_init'):
+        if hasattr(self, 'lambda_x_init') and tf.shape(self.lambda_x_init)[0] == tf.shape(self.mem[0])[0]:
             return [self.lambda_x_init,0,0]  # step returns x_i, drift, diffusion, lambda needs same shape
         self.lambda_x_init = tf.zeros(tf.shape(self.mem[0]))
         return [self.lambda_x_init, 0, 0]
