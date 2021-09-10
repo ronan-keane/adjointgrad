@@ -3,8 +3,9 @@ import pickle
 import numpy as np
 from sdegrad import sde, sde_mle, jump_ode
 import tensorflow as tf
+import random
 
-#%%
+#%%  make dataset
 with open('electricdata.pkl', 'rb') as f:
     data = pickle.load(f)
 # excerpt of data from https://archive.ics.uci.edu/ml/datasets/ElectricityLoadDiagrams20112014
@@ -23,7 +24,7 @@ std = np.std(train, axis=0)
 train = (train-mean)/std
 test = (test-mean)/std
 
-# add periodicity: in days and years
+# add periodicity: in days and years. Only use the periodicity as input, not the actual time
 time = np.arange(0, len(data))
 dayperiod = time/(24*4)*2*np.pi
 yearperiod = time/(24*4*365)*2*np.pi
@@ -33,7 +34,6 @@ periods = np.concatenate([np.expand_dims(np.sin(dayperiod),1), np.expand_dims(np
 train = np.concatenate([train, periods[:split_ind]], axis=1)
 test = np.concatenate([test, periods[split_ind:]], axis=1)
 
-# convert to tensor
 train = tf.convert_to_tensor(train, dtype=tf.float32)
 test = tf.convert_to_tensor(test, dtype=tf.float32)
 
@@ -44,18 +44,55 @@ class mysde(sde_mle):
 # class mysde(jump_ode):
     # Just the sde class, with periodicity added
     @tf.function
-    def add_periodic_input_to_curstate(self, curstate, t):
-        batch_size = tf.shape(curstate)[0]
+    def add_time_input_to_curstate(self, curstate, t):
         dayperiod = t/(24*4)*2*3.1415926535
         yearperiod = t/(24*4*365)*2*3.1415926535
-        temp = tf.tile(tf.expand_dims(tf.stack([tf.math.sin(dayperiod), tf.math.cos(dayperiod),
-            tf.math.sin(yearperiod), tf.math.cos(yearperiod)]),0),[batch_size,1])
-        return tf.concat([curstate, temp],1)
+        times = tf.stack([tf.math.sin(dayperiod), tf.math.cos(dayperiod),
+            tf.math.sin(yearperiod), tf.math.cos(yearperiod)], axis=1)
+        return tf.concat([curstate, times],1)
 
 
 # model = mysde(20, pastlen=12, l2=.01, p=1e-4)  # parameters for huber loss
 # model = mysde(20, pastlen=12, l2=.005)  # for mle loss
-model = mysde(20, 3, pastlen=12, p=0)  # for jump_ode
+model = mysde(20, 3, pastlen=12, l2=.015)  # for jump_ode
+
+
+#%% training loop
+
+def training_loop(model, data, prediction_length, epochs, learning_rate, batch_size, report_every=100):
+    # prediction_length is the integer length of prediction model should do
+    # epoch is the float number of epochs
+    # report_every: print out objective for current batch every report_every batches
+    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    # randomly make batches for the requested number of epochs
+    inds = list(range(model.pastlen, len(data)-prediction_length))  # possible indices of first prediction
+    inds_list = []
+    for i in range(epochs//1):
+        random.shuffle(inds)
+        inds_list.extend(inds)
+    random.shuffle(inds)
+    inds_list.extend(inds[:int(len(inds)*(epochs-(epochs//1)))])
+    average_obj = []
+    for i in range(len(inds_list)//batch_size):  # for each batch
+        inds = inds_list[i*batch_size:(i+1)*batch_size]  # starting indices for first prediction of current batch
+        ind_float = tf.convert_to_tensor(inds, dtype=tf.float32)
+        # make inputs for batch
+        curdata = [tf.stack([train[inds[j]+k-model.pastlen,:] for j in range(len(inds))], axis=0)
+                   for k in range(prediction_length+model.pastlen)]
+        init_state = curdata[:model.pastlen]
+        yhat = curdata[model.pastlen:]
+        # do update
+        obj, grad = model.grad(init_state, prediction_length, yhat, start=ind_float)
+        optimizer.apply_gradients(zip(grad, model.trainable_variables))
+
+        # reporting
+        average_obj.append(obj.numpy())
+        if i % 100 == 0:
+            print('batch '+str(i)+' objective value is '+str(obj.numpy())+
+                  ', average over past '+str(report_every)+' batches is '+str(np.mean(average_obj)))
+            average_obj = []
+
+
 
 #%% training
 # used for huber loss

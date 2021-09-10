@@ -128,7 +128,7 @@ class sde(tf.keras.Model):
             curstate: shape (pastlen, batch size, dimension). current measurements + history
                 (curstate is equivalent to x_{i-1})
             z: shape (batch size, dimension, 1) where each entry is normally distributed
-            t: time index of prediction
+            t: (batch size,) tensor with time index of each prediction
         """
         batch_size, dim_maybe_with_t = tf.shape(curstate)[1], tf.shape(curstate)[2]
         last_curstate = curstate[-1][:,:self.dim]  # most recent measurements
@@ -141,13 +141,13 @@ class sde(tf.keras.Model):
 
 
         diff_det = tf.math.reduce_prod(tf.linalg.diag_part(diff), axis=1)  # determinant
-        out = self.add_periodic_input_to_curstate(
+        out = self.add_time_input_to_curstate(
             last_curstate + drift + tf.squeeze(tf.matmul(diff,z),axis=-1), t)
 
         return out, diff_det  # returns tuple of (x_i, determinant) - det is used in loss
 
     @tf.function
-    def add_periodic_input_to_curstate(self, curstate, t):
+    def add_time_input_to_curstate(self, curstate, t):
         """Curstate has shape (batch size, self.dim). t is current time index. Add time to curstate."""
         return curstate
 
@@ -158,7 +158,8 @@ class sde(tf.keras.Model):
                 (ntimesteps, batch_size, dimension). init_state are the initial conditions for SDE
             ntimesteps: integer number of timesteps
             yhat: target. list of tensors, in shape of (ntimesteps, batch size, dimension)
-            start: time index of first prediction (init_state[-1]+1). Assumed same for entire batch.
+            start: float32 tensor with shape (batch_size,) each entry is the time index of first prediction
+                for that sample
         Returns:
             objective value calculated from self.loss (when yhat is not None)
         """
@@ -197,7 +198,7 @@ class sde_mle(sde):
             curstate: shape (pastlen, batch size, dimension). current measurements + history
                 (curstate is equivalent to x_{i-1})
             z: shape (batch size, dimension, 1) where each entry is normally distributed
-            t: time index of prediction
+            t: (batch size,) tensor with time index of each prediction
         """
         batch_size, dim_maybe_with_t = tf.shape(curstate)[1], tf.shape(curstate)[2]
         last_curstate = curstate[-1][:,:self.dim]  # most recent measurements
@@ -209,7 +210,7 @@ class sde_mle(sde):
         diff = self.diffusion(curstate)
 
         mu = last_curstate + drift
-        out = self.add_periodic_input_to_curstate(
+        out = self.add_time_input_to_curstate(
             mu + tf.squeeze(tf.matmul(diff,z),axis=-1), t)
 
         return out, mu, diff
@@ -311,17 +312,17 @@ class jump_ode(tf.keras.Model):
         return logits, posjumps, negjumps
 
     @tf.function
-    def add_periodic_input_to_curstate(self, curstate, t):
-        """Curstate has shape (batch size, self.dim). t is current time index. Add time to curstate."""
+    def add_time_input_to_curstate(self, curstate, t):
+        """Curstate has shape (batch size, self.dim). t is tensor of current time index. Add time to curstate."""
         return curstate
 
     @tf.function
     def loss(self, pred, true, sample_weight=None):
-        """Returns loss for the current prediction, pred, with l1 maximization term."""
+        """Returns loss for the current prediction."""
         return self.loss_fn(true, pred, sample_weight=sample_weight)
 
     @tf.function
-    def loss_over_batch(self, pred, true, l1, sample_weight=None):  # Does not average over batch.
+    def loss_over_batch(self, pred, true, sample_weight=None):  # Does not average over batch.
         return self.loss_no_reduction(true, pred, sample_weight=sample_weight)
 
     @tf.function
@@ -330,7 +331,7 @@ class jump_ode(tf.keras.Model):
         The equivalent of both the h_i and p_i(y_i) function.
             curstate: shape (pastlen, batch size, dimension). current measurements + history
                 (curstate is equivalent to x_{i-1})
-            t: time index of prediction
+            t: (batch size,) tensor with time index of each prediction
             use_y: if None, we sample y according to p_i(y_i), and return x_i, entropy, y. If use_y=y,
                 then we return x_i, entropy, \log p_i(y).
                 use_y=None is used in the forward pass and we keep y in memory. Reverse pass uses
@@ -361,7 +362,7 @@ class jump_ode(tf.keras.Model):
         jumps = tf.reshape(jumps, (batch_size, self.dim))
 
         # the next state
-        out = self.add_periodic_input_to_curstate(
+        out = self.add_time_input_to_curstate(
             last_curstate + drift + jumps, t)
 
         if use_y==None: # forward pass
@@ -384,7 +385,8 @@ class jump_ode(tf.keras.Model):
                 (ntimesteps, batch_size, dimension). init_state are the initial conditions for process.
             ntimesteps: integer number of timesteps
             true: target. list of tensors, in shape of (ntimesteps, batch size, dimension)
-            start: time index of first prediction (init_state[-1]+1). Assumed same for entire batch.
+            start: float32 tensor with shape (batch_size,) each entry is the time index of first prediction
+                for that sample
             loss_output: if 'scalar' returns mean loss value over batch. If 'batch', returns loss value for
                 each sample in batch.
         Returns:
@@ -407,10 +409,10 @@ class jump_ode(tf.keras.Model):
         sample_weight = tf.cast(1/ntimesteps, tf.float32)
 
         for i in range(ntimesteps):
-            nextstate, l1, y = self.step(
+            nextstate, y = self.step(
                 self.curstate, tf.convert_to_tensor(start+i, dtype=tf.float32))
             if true is not None:
-                obj.append(loss(nextstate, true[i], l1, sample_weight=sample_weight))
+                obj.append(loss(nextstate, true[i], sample_weight=sample_weight))
 
             self.mem.append(nextstate)
             self.ymem.append(y)
