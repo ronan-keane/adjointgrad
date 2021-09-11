@@ -60,7 +60,7 @@ class sde(tf.keras.Model):
             # calculate vector jacobian products
             with tf.GradientTape() as g:
                 g.watch(xim1)
-                xi_and_extra = self.step(xim1, zi, tf.convert_to_tensor(start+i, dtype=tf.float32))
+                xi_and_extra = self.step(xim1, zi, start+i)
             with tf.GradientTape() as gg:
                 gg.watch(xi_and_extra)
                 f = self.loss(xi_and_extra, yhati, sample_weight=sample_weight)
@@ -176,7 +176,7 @@ class sde(tf.keras.Model):
 
         for i in range(ntimesteps):
             z = tf.random.normal((batch_size, self.dim, 1))
-            nextstate = self.step(self.curstate, z, tf.convert_to_tensor(start+i, dtype=tf.float32))  # call to model
+            nextstate = self.step(self.curstate, z, start+i)  # call to model
             if yhat is not None:
                 obj.append(self.loss(nextstate, yhat[i], sample_weight=sample_weight))  # call to loss if requested
 
@@ -409,8 +409,7 @@ class jump_ode(tf.keras.Model):
         sample_weight = tf.cast(1/ntimesteps, tf.float32)
 
         for i in range(ntimesteps):
-            nextstate, y = self.step(
-                self.curstate, tf.convert_to_tensor(start+i, dtype=tf.float32))
+            nextstate, y = self.step(self.curstate, start+i)
             if true is not None:
                 obj.append(loss(nextstate, true[i], sample_weight=sample_weight))
 
@@ -448,13 +447,13 @@ class jump_ode(tf.keras.Model):
 
             with tf.GradientTape() as g:
                 g.watch(xim1)
-                xi_and_extra =  self.step(xim1, tf.convert_to_tensor(start+i, dtype=tf.float32), use_y=yi)
+                xi_and_extra =  self.step(xim1, start+i, use_y=yi)
             xi = xi_and_extra[0]
             with tf.GradientTape() as gg:
                 gg.watch(xi)
                 f = self.loss(xi, truei, sample_weight=sample_weight)
             dfdx = gg.gradient(f, xi)
-            lam[-1][0] += dfdx[0]
+            lam[-1][0] += dfdx
             vjp = g.gradient(xi_and_extra, [xim1, self.trainable_variables], output_gradients=lam[-1])
 
             # update gradient
@@ -512,7 +511,7 @@ class SimpleBaseline:
                 self.baseline = self.alpha*obj[diff:] + (1-self.alpha)*self.baseline
             self.baseline = np.concatenate((obj[:diff], self.baseline), axis=0)
         elif diff < 0:
-            self.baseline[diff:] = self.alpha*obj + (1-self.alpha)*self.baseline[diff:]
+            self.baseline[-len(obj):] = self.alpha*obj + (1-self.alpha)*self.baseline[-len(obj):]
         else:
             self.baseline = self.alpha*obj + (1-self.alpha)*self.baseline
 

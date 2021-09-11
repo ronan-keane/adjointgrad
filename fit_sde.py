@@ -40,8 +40,8 @@ test = tf.convert_to_tensor(test, dtype=tf.float32)
 #%% make model
 
 # class mysde(sde):
-class mysde(sde_mle):
-# class mysde(jump_ode):
+# class mysde(sde_mle):
+class mysde(jump_ode):
     # Just the sde class, with periodicity added
     @tf.function
     def add_time_input_to_curstate(self, curstate, t):
@@ -53,8 +53,8 @@ class mysde(sde_mle):
 
 
 # model = mysde(20, pastlen=12, l2=.01, p=1e-4)  # parameters for huber loss
-model = mysde(20, pastlen=12, l2=.008)  # for mle loss
-# model = mysde(20, 3, pastlen=12, l2=.015)  # for jump_ode
+# model = mysde(20, pastlen=12, l2=.008)  # for mle loss
+model = mysde(20, 5, pastlen=12, l2=.008)  # for jump_ode
 
 
 #%% training loop
@@ -103,24 +103,39 @@ def training_loop(model, data, prediction_length, epochs, learning_rate, batch_s
 # training_loop(model, train, 192, .15, 5e-6, 8)
 
 # for mle loss
-training_loop(model, train, 3, .15, 1e-4, 8)
-training_loop(model, train, 6, .15, 1e-3, 8)
-training_loop(model, train, 12, .25, 1e-4, 8)
-training_loop(model, train, 24, .25, 5e-4, 8)
-training_loop(model, train, 48, .25, 1e-4, 8)
-training_loop(model, train, 96, .1, 1e-5, 16)
-training_loop(model, train, 192, .1, 5e-6, 16)
+# training_loop(model, train, 3, .15, 1e-4, 8)
+# training_loop(model, train, 6, .15, 1e-3, 8)
+# training_loop(model, train, 12, .25, 1e-4, 8)
+# training_loop(model, train, 24, .25, 5e-4, 8)
+# training_loop(model, train, 48, .25, 1e-4, 8)
+# training_loop(model, train, 96, .1, 1e-5, 16)
+# training_loop(model, train, 192, .1, 5e-6, 16)
 
 # for jump_ode
-# batch_size_list = [8, 8, 8, 8]
-# learning_rate_list = [1e-4, 1e-4, 1e-4, 1e-4]
-# prediction_length_list = [3, 6, 12, 24]  # 3 hours up to 2 days
-# nbatches_list = [2000, 2000, 2000, 2000]
+# training_loop(model, train, 3, .1, 1e-4, 4)  # with l2 = .008, jumpdim=5
+# training_loop(model, train, 6, .1, 1e-4, 4)
+# training_loop(model, train, 12, .15, 1e-4, 4)
+# model.save_weights('electric_sde_checkpoint')
+training_loop(model, train, 24, .15, 1e-5, 4)  # seems good
+model.save_weights('electric_sde_checkpoint1')
+training_loop(model, train, 48, .15, 6e-6, 4)  # lr too big maybe keep? 
+model.save_weights('electric_sde_checkpoint2')
+training_loop(model, train, 96, .15, 2e-6, 8)  # lr too big?
+model.save_weights('electric_sde_checkpoint3')
+training_loop(model, train, 192, .15, 1e-6, 8)
 
-# batch_size_list = [1, 1, 1, 1, 1]
-# learning_rate_list = [1e-4, 1e-4, 5e-5, 1e-5, 1e-6]
-# prediction_length_list = [12, 24, 48, 96, 192]  # 3 hours up to 2 days
-# nbatches_list = [5000, 5000, 5000, 5000, 5000]
+# training_loop(model, train, 3, .15, 1e-4, 8)  # with l2=.012, jumpdim=5
+# training_loop(model, train, 6, .15, 1e-4, 8)
+# training_loop(model, train, 12, .25, 1e-4, 8)
+# model.save_weights('electric_sde_checkpoint')
+# training_loop(model, train, 24, .25, 1e-5, 4)
+# model.save_weights('electric_sde_checkpoint1')
+# training_loop(model, train, 48, .25, 1e-5, 4)
+# model.save_weights('electric_sde_checkpoint2')
+# training_loop(model, train, 96, .3, 1e-6, 4)
+# model.save_weights('electric_sde_checkpoint3')
+# training_loop(model, train, 192, .3, 1e-6, 4)
+
 
 #%% make baseline model which uses average electric in that time at that day of the week
 period = 384
@@ -131,7 +146,7 @@ def baseline(ind):
 
 #%% test
 import matplotlib.pyplot as plt
-batch_size = 200  # number of replications
+batch_size = 1  # number of replications
 prediction_length = 24*4*3
 ind = 12  # starting time in test set
 customer = 10  # which customer to plot
@@ -153,6 +168,7 @@ y1 = [yhat[i][0,customer] for i in range(len(yhat))]
 x = [[model.mem[i+model.pastlen][j,customer] for i in range(len(yhat))] for j in range(batch_size)]
 base_y = [baseline(i)[customer] for i in range(ind, ind+prediction_length)]
 
+plt.figure()
 plt.plot(y1)
 print('baseline mse is '+str(np.mean(np.square(np.array(y1)-np.array(base_y)))))
 print('sde mse is '+str(np.mean(np.square(np.array(x[0])-np.array(y1)))))
@@ -185,11 +201,11 @@ plt.plot(input_t, input_y, 'C3')
 frame.tick_params(bottom=False)
 frame.axes.xaxis.set_ticks([])
 plt.ylabel('normalized demand')
-plt.xlabel('time (7 days total)')
+plt.xlabel('time (3 days total)')
 
 legend_elements = [Line2D([0], [0], color='C0', label='ground truth'),
-                   Patch(facecolor='C2', alpha=.3, label='Huber SDE mean '+u'\u00b1'+' std dev'),
-                   Line2D([0], [0], color = 'C2', alpha=.3, label = 'Huber SDE example prediction'),
+                   Patch(facecolor='C2', alpha=.3, label='MLE SDE mean '+u'\u00b1'+' std dev'),
+                   Line2D([0], [0], color = 'C2', alpha=.3, label = 'MLE SDE example prediction'),
                    Line2D([0], [0], color='C1', label = 'historical average'),
                    Line2D([0], [0], color='C3', label = 'Input')]
 
