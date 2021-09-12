@@ -1,2 +1,2 @@
-model_checkpoint_path: "electric_sde_checkpoint2"
-all_model_checkpoint_paths: "electric_sde_checkpoint2"
+model_checkpoint_path: "electric_sde_jumps4"
+all_model_checkpoint_paths: "electric_sde_jumps4"

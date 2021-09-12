@@ -54,7 +54,7 @@ class mysde(jump_ode):
 
 # model = mysde(20, pastlen=12, l2=.01, p=1e-4)  # parameters for huber loss
 # model = mysde(20, pastlen=12, l2=.008)  # for mle loss
-model = mysde(20, 5, pastlen=12, l2=.008)  # for jump_ode
+model = mysde(20, 5, delta=.5, pastlen=12, l2=.008)  # for jump_ode
 
 
 #%% training loop
@@ -108,33 +108,16 @@ def training_loop(model, data, prediction_length, epochs, learning_rate, batch_s
 # training_loop(model, train, 12, .25, 1e-4, 8)
 # training_loop(model, train, 24, .25, 5e-4, 8)
 # training_loop(model, train, 48, .25, 1e-4, 8)
-# training_loop(model, train, 96, .1, 1e-5, 16)
-# training_loop(model, train, 192, .1, 5e-6, 16)
+# training_loop(model, train, 96, .1, 1e-5, 8)
+# training_loop(model, train, 192, .1, 5e-6, 8)
 
 # for jump_ode
-# training_loop(model, train, 3, .1, 1e-4, 4)  # with l2 = .008, jumpdim=5
-# training_loop(model, train, 6, .1, 1e-4, 4)
-# training_loop(model, train, 12, .15, 1e-4, 4)
-# model.save_weights('electric_sde_checkpoint')
-training_loop(model, train, 24, .15, 1e-5, 4)  # seems good
-model.save_weights('electric_sde_checkpoint1')
-training_loop(model, train, 48, .15, 6e-6, 4)  # lr too big maybe keep? 
-model.save_weights('electric_sde_checkpoint2')
-training_loop(model, train, 96, .15, 2e-6, 8)  # lr too big?
-model.save_weights('electric_sde_checkpoint3')
-training_loop(model, train, 192, .15, 1e-6, 8)
+training_loop(model, train, 12, .04, 1e-4, 1)
+training_loop(model, train, 24, .04, 1e-4, 1)
+training_loop(model, train, 48, .04, 5e-5, 1)
+training_loop(model, train, 96, .04, 1e-5, 1)
+training_loop(model, train, 192, .04, 1e-6, 1)
 
-# training_loop(model, train, 3, .15, 1e-4, 8)  # with l2=.012, jumpdim=5
-# training_loop(model, train, 6, .15, 1e-4, 8)
-# training_loop(model, train, 12, .25, 1e-4, 8)
-# model.save_weights('electric_sde_checkpoint')
-# training_loop(model, train, 24, .25, 1e-5, 4)
-# model.save_weights('electric_sde_checkpoint1')
-# training_loop(model, train, 48, .25, 1e-5, 4)
-# model.save_weights('electric_sde_checkpoint2')
-# training_loop(model, train, 96, .3, 1e-6, 4)
-# model.save_weights('electric_sde_checkpoint3')
-# training_loop(model, train, 192, .3, 1e-6, 4)
 
 
 #%% make baseline model which uses average electric in that time at that day of the week
@@ -146,9 +129,9 @@ def baseline(ind):
 
 #%% test
 import matplotlib.pyplot as plt
-batch_size = 1  # number of replications
+batch_size = 200  # number of replications
 prediction_length = 24*4*3
-ind = 12  # starting time in test set
+ind = 74  # starting time in test set
 customer = 10  # which customer to plot
 
 offset = len(train)
@@ -204,11 +187,11 @@ plt.ylabel('normalized demand')
 plt.xlabel('time (3 days total)')
 
 legend_elements = [Line2D([0], [0], color='C0', label='ground truth'),
-                   Patch(facecolor='C2', alpha=.3, label='MLE SDE mean '+u'\u00b1'+' std dev'),
-                   Line2D([0], [0], color = 'C2', alpha=.3, label = 'MLE SDE example prediction'),
+                   Patch(facecolor='C2', alpha=.3, label='Jump SDE mean '+u'\u00b1'+' std dev'),
+                   Line2D([0], [0], color = 'C2', alpha=.3, label = 'Jump SDE example prediction'),
                    Line2D([0], [0], color='C1', label = 'historical average'),
                    Line2D([0], [0], color='C3', label = 'Input')]
 
-frame.legend(handles=legend_elements)
+frame.legend(handles=legend_elements, loc='lower left')
 
 

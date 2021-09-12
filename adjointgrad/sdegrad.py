@@ -237,7 +237,7 @@ class sde_mle(sde):
 
         sigma_chol = tf.linalg.triangular_solve(
             sigma_chol, tf.eye(self.dim, batch_shape=[batch_size]))  # inverse of cholesky factor of covariance matrix
-        mle = tf.matmul(tf.expand_dims(yhat - mu, axis=1), sigma_chol)
+        mle = tf.matmul(tf.expand_dims(yhat - mu, axis=1), sigma_chol, transpose_b=True)
         mle = tf.squeeze(tf.matmul(mle, mle, transpose_b=True), [1, 2])
 
         return tf.reduce_mean(.5*mle+tf.math.log(det))*sample_weight
