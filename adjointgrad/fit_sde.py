@@ -4,6 +4,19 @@ import numpy as np
 from sdegrad import sde, sde_mle, jump_ode
 import tensorflow as tf
 import random
+from tqdm import tqdm
+
+#%% these are small models which run faster on cpu, disable gpu
+try:
+    # Disable all GPUS
+    tf.config.set_visible_devices([], 'GPU')
+    visible_devices = tf.config.get_visible_devices()
+    for device in visible_devices:
+        assert device.device_type != 'GPU'
+except:
+    # Invalid device or cannot modify virtual devices once initialized.
+    pass
+
 
 #%%  make dataset
 with open('electricdata.pkl', 'rb') as f:
@@ -87,7 +100,7 @@ def training_loop(model, data, prediction_length, epochs, learning_rate, batch_s
 
         # reporting
         average_obj.append(obj.numpy())
-        if i % 100 == 0:
+        if i % report_every == 0:
             print('batch '+str(i)+' objective value is '+str(obj.numpy())+
                   ', average over past '+str(report_every)+' batches is '+str(np.mean(average_obj)))
             average_obj = []
@@ -112,11 +125,22 @@ def training_loop(model, data, prediction_length, epochs, learning_rate, batch_s
 # training_loop(model, train, 192, .1, 5e-6, 8)
 
 # for jump_ode
-training_loop(model, train, 12, .04, 1e-4, 1)
-training_loop(model, train, 24, .04, 1e-4, 1)
-training_loop(model, train, 48, .04, 5e-5, 1)
-training_loop(model, train, 96, .04, 1e-5, 1)
-training_loop(model, train, 192, .04, 1e-6, 1)
+# training_loop(model, train, 12, .04, 1e-4, 1)
+# training_loop(model, train, 24, .04, 1e-4, 1)
+# training_loop(model, train, 48, .04, 5e-5, 1)
+# training_loop(model, train, 96, .04, 1e-5, 1)
+# training_loop(model, train, 192, .04, 1e-6, 1)
+
+training_loop(model, train, 12, .04, 1e-4, 1) #.04 -> .08
+model.save_weights('checkpoint1')
+training_loop(model, train, 24, .08, 1e-4, 1)
+model.save_weights('checkpoint2')
+training_loop(model, train, 48, .08, 5e-5, 1)
+model.save_weights('checkpoint3')
+training_loop(model, train, 96, .08, 1e-5, 1)
+model.save_weights('checkpoint4')
+training_loop(model, train, 192, .08, 1e-6, 1)
+
 
 
 
@@ -124,15 +148,15 @@ training_loop(model, train, 192, .04, 1e-6, 1)
 period = 384
 baseline_predictions = [np.mean(train[i::period], axis=0) for i in range(period)]
 def baseline(ind):
-    ind = (ind+len(train))%(period)
+    ind = ind%(period)
     return baseline_predictions[ind]
 
 #%% test
 import matplotlib.pyplot as plt
 batch_size = 200  # number of replications
-prediction_length = 24*4*3
-ind = 74  # starting time in test set
-customer = 10  # which customer to plot
+prediction_length = 12
+ind = 200  # starting time in test set
+customer = 15  # which customer to plot
 
 offset = len(train)
 assert ind-model.pastlen >=0
@@ -149,7 +173,7 @@ obj = model.solve(init_state, prediction_length, yhat, start=ind_float+offset)
 
 y1 = [yhat[i][0,customer] for i in range(len(yhat))]
 x = [[model.mem[i+model.pastlen][j,customer] for i in range(len(yhat))] for j in range(batch_size)]
-base_y = [baseline(i)[customer] for i in range(ind, ind+prediction_length)]
+base_y = [baseline(i+offset)[customer] for i in range(ind, ind+prediction_length)]
 
 plt.figure()
 plt.plot(y1)
@@ -195,3 +219,36 @@ legend_elements = [Line2D([0], [0], color='C0', label='ground truth'),
 frame.legend(handles=legend_elements, loc='lower left')
 
 
+#%% testing over entire test set
+
+def testing_error(model, data, replications, prediction_length, starting=0, offset=0):
+    assert starting >= model.pastlen
+    baseline_errors = []
+    pred_errors = []
+
+    for i in tqdm(range((len(data)-starting) // prediction_length)):
+        ind = starting + i*prediction_length
+        curdata = [tf.tile(data[j+ind-model.pastlen:j+ind-model.pastlen+1,:], [replications, 1]) for j in range(prediction_length+model.pastlen)]
+    
+        init_state = curdata[:model.pastlen]
+        yhat = curdata[model.pastlen:]
+        ind_float = tf.convert_to_tensor([ind for i in range(replications)], dtype=tf.float32)
+        model.solve(init_state, prediction_length, start=ind_float+offset)
+        
+        baseline_pred = [baseline(i+offset) for i in range(ind, ind+prediction_length)]
+        baseline_constant = [init_state[-1][0] for i in range(prediction_length)]
+        yhat = tf.convert_to_tensor(yhat)
+        baseline_error = tf.reduce_mean(tf.square(tf.convert_to_tensor(baseline_pred) - yhat[:,0,:]))
+        baseline_error_constant = tf.reduce_mean(tf.square(tf.convert_to_tensor(baseline_constant) - yhat[:,0,:]))
+        baseline_error = min(baseline_error, baseline_error_constant)
+        
+        pred =  tf.reduce_mean(tf.convert_to_tensor(model.mem[model.pastlen:]),axis=1)  # average over the replications
+        pred_error = tf.reduce_mean(tf.square(pred - yhat[:,0,:]))
+        baseline_errors.append(baseline_error.numpy())
+        pred_errors.append(pred_error.numpy())
+    return pred_errors, baseline_errors
+
+
+pred_errors, baseline_errors = testing_error(model, test, 200, 12, starting=12, offset=len(train))
+        
+        

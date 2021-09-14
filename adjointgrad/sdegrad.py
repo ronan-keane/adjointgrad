@@ -288,7 +288,8 @@ class jump_ode(tf.keras.Model):
         self.l2 = tf.cast(l2, tf.float32)
 
         # simple baseline
-        self.baseline = SimpleBaseline()
+        # self.baseline = SimpleBaseline(alpha=.005)
+        self.baseline = NoBaseline()
 
     @tf.function
     def drift(self, curstate):
@@ -481,6 +482,109 @@ class jump_ode(tf.keras.Model):
         batch_size = tf.shape(obj)[0]
         baselines = tf.repeat(self.baseline(ind, ntimesteps), batch_size)
         return [0, obj[:,ind] - baselines]
+    
+
+class PiecewiseODE(jump_ode):
+    def __init__(self, dim, jumpdim, pastlen=1, delta=.5, l2=.01):
+        super(tf.keras.Model).__init__()
+        assert type(dim) == int
+        assert type(jumpdim) == int
+        assert type(pastlen) == int
+        assert dim>0
+        assert jumpdim > 1
+        assert jumpdim % 2 == 1
+        assert pastlen >0
+        self.dim = dim
+        self.jumpdim = jumpdim
+        self.pastlen = pastlen
+        self.njumps = (self.jumpdim-1)//2  # number of possibilities for each of positive, negative jumps
+
+        # drift architecture
+        self.drift_dense1 = tf.keras.layers.Dense(100, activation='tanh')
+        self.drift_dense2 = tf.keras.layers.Dense(100, activation='tanh')
+        self.drift_dense3 = tf.keras.layers.Dense(100, activation=None)
+        self.drift_output = tf.keras.layers.Dense(dim*jumpdim, activation=None)
+        # jumps architecture
+        self.jumps_dense1 = tf.keras.layers.Dense(100, activation='tanh')
+        self.jumps_dense2 = tf.keras.layers.Dense(100, activation='tanh')
+        self.jumps_dense3 = tf.keras.layers.Dense(100, activation=None)
+        self.jumps_output = tf.keras.layers.Dense(dim*jumpdim, activation=None)
+
+        self.loss_fn = tf.keras.losses.Huber(delta=delta)
+        self.loss_no_reduction = tf.keras.losses.Huber(delta=delta, reduction=tf.keras.losses.Reduction.NONE)
+        self.l2 = tf.cast(l2, tf.float32)
+
+        # simple baseline
+        # self.baseline = SimpleBaseline(alpha=.005)
+        self.baseline = NoBaseline()
+        
+    @tf.function
+    def drift(self, curstate):
+        drift1 = self.drift_dense1(curstate)
+        drift = self.drift_dense2(drift1)
+        drift = self.drift_dense3(drift) + drift1
+        drift = tf.keras.activations.relu(drift)
+        drift = self.drift_output(drift)
+        return drift
+
+    @tf.function
+    def jumps(self, curstate):
+        jump1 = self.jumps_dense1(curstate)
+        jumps = self.jumps_dense2(jump1)
+        jumps = self.jumps_dense3(jumps) + jump1
+        jumps = tf.keras.activations.relu(jumps)
+        jumps = self.jumps_output(jumps)  # output logits and jump magnitudes
+        return jumps
+    
+    @tf.function
+    def step(self, curstate, t, use_y=None):
+        """
+        The equivalent of both the h_i and p_i(y_i) function.
+            curstate: shape (pastlen, batch size, dimension). current measurements + history
+                (curstate is equivalent to x_{i-1})
+            t: (batch size,) tensor with time index of each prediction
+            use_y: if None, we sample y according to p_i(y_i), and return x_i, entropy, y. If use_y=y,
+                then we return x_i, entropy, \log p_i(y).
+                use_y=None is used in the forward pass and we keep y in memory. Reverse pass uses
+                use_y=y so that we can calculate the relevant vjp.
+        """
+        batch_size, dim_maybe_with_t = tf.shape(curstate)[1], tf.shape(curstate)[2]
+        last_curstate = curstate[-1][:,:self.dim]  # most recent measurements
+        curstate = tf.transpose(curstate, [1,0,2])
+        curstate = tf.reshape(curstate, (batch_size, dim_maybe_with_t*self.pastlen))
+
+        # call to model
+        drifts = self.drift(curstate)
+        logits = self.jumps(curstate)
+        # reshaping logits/jumps
+        logits = tf.reshape(logits, (batch_size*self.dim, self.jumpdim))
+        drifts = tf.reshape(drifts, (batch_size*self.dim, self.jumpdim))
+
+        # sample y, which represents which jump category we take
+        if use_y==None:
+            y = tf.random.categorical(logits, 1, dtype=tf.int32)
+        else:
+            y = use_y
+        # select corresponding jumps from y
+        inds = tf.concat([self.jumps_ind_pad, y], axis=1)
+        drift = tf.gather_nd(drifts, inds)
+        drift = tf.reshape(drift, (batch_size, self.dim))
+
+        # the next state
+        out = self.add_time_input_to_curstate(last_curstate + drift, t)
+
+        if use_y==None: # forward pass
+            return out, y
+        else:  # reverse
+            # create log probability of the jumps corresponding to y
+            probs = tf.exp(logits)
+            probs = probs/tf.reshape(tf.reduce_sum(probs, axis=1), (batch_size*self.dim, 1))  # normmalize
+            probs = tf.reshape(probs, (batch_size, self.dim, self.jumpdim))
+            probs = tf.math.log(probs)
+            probs = tf.gather_nd(probs, inds)
+            probs = tf.reshape(probs, (batch_size, self.dim))
+            probs = tf.reduce_sum(probs, axis=1)
+            return out, probs
 
 
 class SimpleBaseline:
