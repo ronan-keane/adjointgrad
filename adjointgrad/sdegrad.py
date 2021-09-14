@@ -431,8 +431,6 @@ class jump_ode(tf.keras.Model):
         # forward pass
         obj = self.solve(init_state, ntimesteps, true=true, start=start, loss_output='batch')
 
-        self.baseline.update(obj)
-
         # reverse pass
         pastlen = self.pastlen
         sample_weight = tf.cast(1/ntimesteps, tf.float32)
@@ -466,6 +464,8 @@ class jump_ode(tf.keras.Model):
                 for j in range(pastlen):
                     lam[j][0] += vjp[0][j]
                 lam.insert(0, self.init_lambda(i-1-pastlen, ntimesteps, obj))
+                
+        self.baseline.update(obj)
 
         # add l2 regularization
         for j in range(len(ghat)):
@@ -515,8 +515,8 @@ class PiecewiseODE(jump_ode):
         self.l2 = tf.cast(l2, tf.float32)
 
         # simple baseline
-        # self.baseline = SimpleBaseline(alpha=.005)
-        self.baseline = NoBaseline()
+        self.baseline = SimpleBaseline(alpha=.005)
+        # self.baseline = NoBaseline()
         
     @tf.function
     def drift(self, curstate):
@@ -592,32 +592,43 @@ class SimpleBaseline:
 
     Assumes that loss is summable, i.e. objective = \sum_{i=1}^n f_i(x_i)
     """
-    def __init__(self, alpha=.02):
+    def __init__(self, alpha=.005, update_every=100):
         """alpha = decay of exponential moving average (higher = faster decay)"""
         self.baseline = np.zeros((0,), dtype=np.single)
+        self.new_baseline = np.copy(self.baseline)
         self.alpha = alpha
+        self.count=0
+        self.update_every=update_every
 
     def __call__(self, ind, ntimesteps):
         """
             ind: index of of current requested baseline (must be less than ntimesteps)
             ntimesteps: number of total timesteps in current forward solve
         """
-        return self.baseline[ind-ntimesteps]
+        if -len(self.baseline)-1 < ind-ntimesteps < 0:
+            return self.baseline[ind-ntimesteps]
+        else:
+            return tf.cast(0, tf.float32)
 
     def update(self, obj):
         """Update constant baseline with new objective values.
         obj should be a tensor with shape (batch size, ntimesteps)
         """
         obj = tf.reduce_mean(obj,axis=0).numpy()
-        diff = len(obj) - len(self.baseline)
+        diff = len(obj) - len(self.new_baseline)
         if diff > 0:
-            if len(self.baseline) > 0:
-                self.baseline = self.alpha*obj[diff:] + (1-self.alpha)*self.baseline
-            self.baseline = np.concatenate((obj[:diff], self.baseline), axis=0)
+            if len(self.new_baseline) > 0:
+                self.new_baseline = self.alpha*obj[diff:] + (1-self.alpha)*self.new_baseline
+            self.new_baseline = np.concatenate((obj[:diff], self.new_baseline), axis=0)
         elif diff < 0:
-            self.baseline[-len(obj):] = self.alpha*obj + (1-self.alpha)*self.baseline[-len(obj):]
+            self.new_baseline[-len(obj):] = self.alpha*obj + (1-self.alpha)*self.new_baseline[-len(obj):]
         else:
-            self.baseline = self.alpha*obj + (1-self.alpha)*self.baseline
+            self.new_baseline = self.alpha*obj + (1-self.alpha)*self.new_baseline
+            
+        self.count+=1
+        if self.count==self.update_every:
+            self.count=0
+            self.baseline = np.copy(self.new_baseline)
 
 class NoBaseline:
     def __init__(self):

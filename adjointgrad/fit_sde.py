@@ -131,15 +131,15 @@ def training_loop(model, data, prediction_length, epochs, learning_rate, batch_s
 # training_loop(model, train, 96, .04, 1e-5, 1)
 # training_loop(model, train, 192, .04, 1e-6, 1)
 
-training_loop(model, train, 12, .04, 1e-4, 1) #.04 -> .08
+training_loop(model, train, 12, .08, 1e-4, 1)
 model.save_weights('checkpoint1')
 training_loop(model, train, 24, .08, 1e-4, 1)
 model.save_weights('checkpoint2')
-training_loop(model, train, 48, .08, 5e-5, 1)
+training_loop(model, train, 48, .04, 2e-5, 1)
 model.save_weights('checkpoint3')
-training_loop(model, train, 96, .08, 1e-5, 1)
+training_loop(model, train, 96, .04, 8e-6, 1)
 model.save_weights('checkpoint4')
-training_loop(model, train, 192, .08, 1e-6, 1)
+training_loop(model, train, 192, .04, 4e-6, 1)
 
 
 
@@ -249,6 +249,6 @@ def testing_error(model, data, replications, prediction_length, starting=0, offs
     return pred_errors, baseline_errors
 
 
-pred_errors, baseline_errors = testing_error(model, test, 200, 12, starting=12, offset=len(train))
+pred_errors, baseline_errors = testing_error(model, test, 200, 24, starting=12, offset=len(train))
         
         
