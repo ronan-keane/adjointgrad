@@ -1,7 +1,7 @@
 # make sure to run this file in the same folder as sdegrad.py, electricdata.pkl
 import pickle
 import numpy as np
-from sdegrad import sde, sde_mle, jump_ode
+from sdegrad import sde, sde_mle, jump_ode, PiecewiseODE
 import tensorflow as tf
 import random
 from tqdm import tqdm
@@ -54,7 +54,8 @@ test = tf.convert_to_tensor(test, dtype=tf.float32)
 
 # class mysde(sde):
 # class mysde(sde_mle):
-class mysde(jump_ode):
+# class mysde(jump_ode):
+class mysde(PiecewiseODE):
     # Just the sde class, with periodicity added
     @tf.function
     def add_time_input_to_curstate(self, curstate, t):
@@ -67,7 +68,8 @@ class mysde(jump_ode):
 
 # model = mysde(20, pastlen=12, l2=.01, p=1e-4)  # parameters for huber loss
 # model = mysde(20, pastlen=12, l2=.008)  # for mle loss
-model = mysde(20, 5, delta=.5, pastlen=12, l2=.008)  # for jump_ode
+# model = mysde(20, 5, delta=.5, pastlen=12, l2=.008)  # for jump_ode
+model = mysde(20, 5, delta=.5, pastlen=12, l2=.008)
 
 
 #%% training loop
@@ -131,15 +133,12 @@ def training_loop(model, data, prediction_length, epochs, learning_rate, batch_s
 # training_loop(model, train, 96, .04, 1e-5, 1)
 # training_loop(model, train, 192, .04, 1e-6, 1)
 
+# piecewise_ode
 training_loop(model, train, 12, .08, 1e-4, 1)
-model.save_weights('checkpoint1')
 training_loop(model, train, 24, .08, 1e-4, 1)
-model.save_weights('checkpoint2')
 training_loop(model, train, 48, .04, 2e-5, 1)
-model.save_weights('checkpoint3')
 training_loop(model, train, 96, .04, 8e-6, 1)
-model.save_weights('checkpoint4')
-training_loop(model, train, 192, .04, 4e-6, 1)
+training_loop(model, train, 192, .02, 4e-6, 1)
 
 
 
@@ -154,9 +153,9 @@ def baseline(ind):
 #%% test
 import matplotlib.pyplot as plt
 batch_size = 200  # number of replications
-prediction_length = 12
-ind = 200  # starting time in test set
-customer = 15  # which customer to plot
+prediction_length = 24*3*4
+ind = 74  # starting time in test set
+customer = 10  # which customer to plot
 
 offset = len(train)
 assert ind-model.pastlen >=0
@@ -229,19 +228,19 @@ def testing_error(model, data, replications, prediction_length, starting=0, offs
     for i in tqdm(range((len(data)-starting) // prediction_length)):
         ind = starting + i*prediction_length
         curdata = [tf.tile(data[j+ind-model.pastlen:j+ind-model.pastlen+1,:], [replications, 1]) for j in range(prediction_length+model.pastlen)]
-    
+
         init_state = curdata[:model.pastlen]
         yhat = curdata[model.pastlen:]
         ind_float = tf.convert_to_tensor([ind for i in range(replications)], dtype=tf.float32)
         model.solve(init_state, prediction_length, start=ind_float+offset)
-        
+
         baseline_pred = [baseline(i+offset) for i in range(ind, ind+prediction_length)]
         baseline_constant = [init_state[-1][0] for i in range(prediction_length)]
         yhat = tf.convert_to_tensor(yhat)
         baseline_error = tf.reduce_mean(tf.square(tf.convert_to_tensor(baseline_pred) - yhat[:,0,:]))
         baseline_error_constant = tf.reduce_mean(tf.square(tf.convert_to_tensor(baseline_constant) - yhat[:,0,:]))
         baseline_error = min(baseline_error, baseline_error_constant)
-        
+
         pred =  tf.reduce_mean(tf.convert_to_tensor(model.mem[model.pastlen:]),axis=1)  # average over the replications
         pred_error = tf.reduce_mean(tf.square(pred - yhat[:,0,:]))
         baseline_errors.append(baseline_error.numpy())
@@ -250,5 +249,5 @@ def testing_error(model, data, replications, prediction_length, starting=0, offs
 
 
 pred_errors, baseline_errors = testing_error(model, test, 200, 24, starting=12, offset=len(train))
-        
-        
+
+

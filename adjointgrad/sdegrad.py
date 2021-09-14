@@ -464,7 +464,7 @@ class jump_ode(tf.keras.Model):
                 for j in range(pastlen):
                     lam[j][0] += vjp[0][j]
                 lam.insert(0, self.init_lambda(i-1-pastlen, ntimesteps, obj))
-                
+
         self.baseline.update(obj)
 
         # add l2 regularization
@@ -482,11 +482,11 @@ class jump_ode(tf.keras.Model):
         batch_size = tf.shape(obj)[0]
         baselines = tf.repeat(self.baseline(ind, ntimesteps), batch_size)
         return [0, obj[:,ind] - baselines]
-    
+
 
 class PiecewiseODE(jump_ode):
     def __init__(self, dim, jumpdim, pastlen=1, delta=.5, l2=.01):
-        super(tf.keras.Model).__init__()
+        super(jump_ode, self).__init__()
         assert type(dim) == int
         assert type(jumpdim) == int
         assert type(pastlen) == int
@@ -517,7 +517,7 @@ class PiecewiseODE(jump_ode):
         # simple baseline
         self.baseline = SimpleBaseline(alpha=.005)
         # self.baseline = NoBaseline()
-        
+
     @tf.function
     def drift(self, curstate):
         drift1 = self.drift_dense1(curstate)
@@ -535,7 +535,7 @@ class PiecewiseODE(jump_ode):
         jumps = tf.keras.activations.relu(jumps)
         jumps = self.jumps_output(jumps)  # output logits and jump magnitudes
         return jumps
-    
+
     @tf.function
     def step(self, curstate, t, use_y=None):
         """
@@ -558,7 +558,7 @@ class PiecewiseODE(jump_ode):
         logits = self.jumps(curstate)
         # reshaping logits/jumps
         logits = tf.reshape(logits, (batch_size*self.dim, self.jumpdim))
-        drifts = tf.reshape(drifts, (batch_size*self.dim, self.jumpdim))
+        drifts = tf.reshape(drifts, (batch_size, self.dim, self.jumpdim))
 
         # sample y, which represents which jump category we take
         if use_y==None:
@@ -624,7 +624,7 @@ class SimpleBaseline:
             self.new_baseline[-len(obj):] = self.alpha*obj + (1-self.alpha)*self.new_baseline[-len(obj):]
         else:
             self.new_baseline = self.alpha*obj + (1-self.alpha)*self.new_baseline
-            
+
         self.count+=1
         if self.count==self.update_every:
             self.count=0
