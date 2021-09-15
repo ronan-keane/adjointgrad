@@ -288,8 +288,8 @@ class jump_ode(tf.keras.Model):
         self.l2 = tf.cast(l2, tf.float32)
 
         # simple baseline
-        # self.baseline = SimpleBaseline(alpha=.005)
-        self.baseline = NoBaseline()
+        self.baseline = SimpleBaseline(alpha=.005)
+        # self.baseline = NoBaseline()
 
     @tf.function
     def drift(self, curstate):
@@ -484,8 +484,8 @@ class jump_ode(tf.keras.Model):
         return [0, obj[:,ind] - baselines]
 
 
-class PiecewiseODE(jump_ode):
-    def __init__(self, dim, jumpdim, pastlen=1, delta=.5, l2=.01):
+class PiecewiseODE(jump_ode):  # a lot of repeated code with jump_ode
+    def __init__(self, dim, jumpdim, pastlen=1, delta=.5, l2=.01, p=1e-4):
         super(jump_ode, self).__init__()
         assert type(dim) == int
         assert type(jumpdim) == int
@@ -513,6 +513,7 @@ class PiecewiseODE(jump_ode):
         self.loss_fn = tf.keras.losses.Huber(delta=delta)
         self.loss_no_reduction = tf.keras.losses.Huber(delta=delta, reduction=tf.keras.losses.Reduction.NONE)
         self.l2 = tf.cast(l2, tf.float32)
+        self.p = p
 
         # simple baseline
         self.baseline = SimpleBaseline(alpha=.005)
@@ -569,12 +570,13 @@ class PiecewiseODE(jump_ode):
         inds = tf.concat([self.jumps_ind_pad, y], axis=1)
         drift = tf.gather_nd(drifts, inds)
         drift = tf.reshape(drift, (batch_size, self.dim))
+        var = tf.math.reduce_std(drifts,axis=2)
 
         # the next state
         out = self.add_time_input_to_curstate(last_curstate + drift, t)
 
         if use_y==None: # forward pass
-            return out, y
+            return out, tf.reduce_mean(var, axis=1), y
         else:  # reverse
             # create log probability of the jumps corresponding to y
             probs = tf.exp(logits)
@@ -584,7 +586,121 @@ class PiecewiseODE(jump_ode):
             probs = tf.gather_nd(probs, inds)
             probs = tf.reshape(probs, (batch_size, self.dim))
             probs = tf.reduce_sum(probs, axis=1)
-            return out, probs
+            return out, tf.reduce_mean(var, axis=1), probs
+        
+    @tf.function
+    def loss(self, pred, true, var, sample_weight=None):
+        """Returns loss for the current prediction."""
+        return self.loss_fn(true, pred, sample_weight=sample_weight) - self.p*sample_weight*tf.reduce_mean(var)
+
+    @tf.function
+    def loss_over_batch(self, pred, true, var, sample_weight=None):  # Does not average over batch.
+        return self.loss_no_reduction(true, pred, sample_weight=sample_weight) - self.p*sample_weight*var
+        
+    def solve(self, init_state, ntimesteps, true=None, start=0, loss_output='scalar'):
+        """
+        Inputs:
+            init_state: list of tensors, each tensor has shape (batch size, dimension), list has shape
+                (ntimesteps, batch_size, dimension). init_state are the initial conditions for process.
+            ntimesteps: integer number of timesteps
+            true: target. list of tensors, in shape of (ntimesteps, batch size, dimension)
+            start: float32 tensor with shape (batch_size,) each entry is the time index of first prediction
+                for that sample
+            loss_output: if 'scalar' returns mean loss value over batch. If 'batch', returns loss value for
+                each sample in batch.
+        Returns:
+            cumulative objective values (when true is not None). Shape is (ntimesteps,) if loss_output='scalar'
+            otherwise shape is (batch_size, ntimesteps)
+        """
+        batch_size = tf.shape(init_state)[1]
+        self.curstate = init_state
+
+        self.mem = []  # list of measurements, each measurement has shape (batch size, dimension)
+        self.mem.extend(init_state)
+        self.ymem = []  # list of jump choices, each choice has shape (batch size*dimension,1) and corresponds
+        # to the index of the selected jump
+        self.jumps_zero_pad = tf.zeros((batch_size, self.dim, 1))
+        self.jumps_ind_pad = tf.stack([tf.repeat(tf.range(batch_size), [self.dim]),
+                         tf.tile(tf.range(self.dim), [batch_size])], axis=1)
+
+        obj = [] if true is not None else None
+        loss = self.loss if loss_output=='scalar' else self.loss_over_batch
+        sample_weight = tf.cast(1/ntimesteps, tf.float32)
+
+        for i in range(ntimesteps):
+            nextstate, var, y = self.step(self.curstate, start+i)
+            if true is not None:
+                obj.append(loss(nextstate, true[i], var, sample_weight=sample_weight))
+
+            self.mem.append(nextstate)
+            self.ymem.append(y)
+
+            self.curstate = self.mem[-self.pastlen:]
+
+        if true is not None:
+            if loss_output !='scalar':
+                obj = tf.stack(obj, axis=1)
+            obj = tf.math.cumsum(obj, reverse=True, axis=-1)
+        return obj
+
+    def grad(self, init_state, ntimesteps, true, start=0, return_obj=True):
+        """Calculates objective value and gradient."""
+
+        # forward pass
+        obj = self.solve(init_state, ntimesteps, true=true, start=start, loss_output='batch')
+
+        # reverse pass
+        pastlen = self.pastlen
+        sample_weight = tf.cast(1/ntimesteps, tf.float32)
+        ghat = [0 for i in range(len(self.trainable_variables))] # initialize gradient
+        lam = [self.init_lambda(i, ntimesteps, obj) for i in range(ntimesteps-1-pastlen,ntimesteps)]
+        # lam[-1] stores the current adjoint variable; lam[:-1] accumulates terms from pastlen
+        # Note that lambda_i needs to have the same shape as step when use_y = y
+
+        for i in reversed(range(ntimesteps)):
+            xim1 = self.mem[i:i+pastlen]
+            yi = self.ymem[i]
+            truei = true[i]
+
+            with tf.GradientTape() as g:
+                g.watch(xim1)
+                xi_and_extra =  self.step(xim1, start+i, use_y=yi)
+            xi, var = xi_and_extra[0], xi_and_extra[1]
+            with tf.GradientTape() as gg:
+                gg.watch([xi, var])
+                f = self.loss(xi, truei, var, sample_weight=sample_weight)
+            dfdx = gg.gradient(f, [xi, var])
+            lam[-1][0] += dfdx[0]
+            lam[-1][1] += dfdx[1]
+            vjp = g.gradient(xi_and_extra, [xim1, self.trainable_variables], output_gradients=lam[-1])
+
+            # update gradient
+            for j in range(len(ghat)):
+                ghat[j] += vjp[1][j]
+            # update adjoint variables
+            if i > 0:
+                lam.pop(-1)
+                for j in range(pastlen):
+                    lam[j][0] += vjp[0][j]
+                lam.insert(0, self.init_lambda(i-1-pastlen, ntimesteps, obj))
+
+        self.baseline.update(obj)
+
+        # add l2 regularization
+        for j in range(len(ghat)):
+            ghat[j] += self.l2*self.trainable_variables[j]
+
+        if return_obj:
+            return tf.reduce_mean(obj[:,0]), ghat
+        else:
+            return ghat
+        
+    def init_lambda(self, ind, ntimesteps, obj):
+        """Initialize lambda_{ind}."""
+        ind = max(ind, 0)
+        batch_size = tf.shape(obj)[0]
+        baselines = tf.repeat(self.baseline(ind, ntimesteps), batch_size)
+        return [0, 0, obj[:,ind] - baselines]
 
 
 class SimpleBaseline:

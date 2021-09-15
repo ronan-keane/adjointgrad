@@ -69,7 +69,7 @@ class mysde(PiecewiseODE):
 # model = mysde(20, pastlen=12, l2=.01, p=1e-4)  # parameters for huber loss
 # model = mysde(20, pastlen=12, l2=.008)  # for mle loss
 # model = mysde(20, 5, delta=.5, pastlen=12, l2=.008)  # for jump_ode
-model = mysde(20, 5, delta=.5, pastlen=12, l2=.008)
+model = mysde(20, 5, delta=.5, pastlen=12, l2=.008, p=5e-2)
 
 
 #%% training loop
@@ -127,18 +127,19 @@ def training_loop(model, data, prediction_length, epochs, learning_rate, batch_s
 # training_loop(model, train, 192, .1, 5e-6, 8)
 
 # for jump_ode
-# training_loop(model, train, 12, .04, 1e-4, 1)
-# training_loop(model, train, 24, .04, 1e-4, 1)
-# training_loop(model, train, 48, .04, 5e-5, 1)
-# training_loop(model, train, 96, .04, 1e-5, 1)
-# training_loop(model, train, 192, .04, 1e-6, 1)
+# training_loop(model, train, 12, .08, 1e-4, 1)
+# training_loop(model, train, 24, .08, 1e-4, 1)
+# training_loop(model, train, 48, .04, 2e-5, 1)
+# training_loop(model, train, 96, .04, 8e-6, 1)
 
-# piecewise_ode
+# for piecewise_ode
 training_loop(model, train, 12, .08, 1e-4, 1)
 training_loop(model, train, 24, .08, 1e-4, 1)
 training_loop(model, train, 48, .04, 2e-5, 1)
 training_loop(model, train, 96, .04, 8e-6, 1)
 training_loop(model, train, 192, .02, 4e-6, 1)
+
+
 
 
 
@@ -210,8 +211,8 @@ plt.ylabel('normalized demand')
 plt.xlabel('time (3 days total)')
 
 legend_elements = [Line2D([0], [0], color='C0', label='ground truth'),
-                   Patch(facecolor='C2', alpha=.3, label='Jump SDE mean '+u'\u00b1'+' std dev'),
-                   Line2D([0], [0], color = 'C2', alpha=.3, label = 'Jump SDE example prediction'),
+                   Patch(facecolor='C2', alpha=.3, label='Piecewise ODE mean '+u'\u00b1'+' std dev'),
+                   Line2D([0], [0], color = 'C2', alpha=.3, label = 'Piecewise ODE example prediction'),
                    Line2D([0], [0], color='C1', label = 'historical average'),
                    Line2D([0], [0], color='C3', label = 'Input')]
 
@@ -248,6 +249,6 @@ def testing_error(model, data, replications, prediction_length, starting=0, offs
     return pred_errors, baseline_errors
 
 
-pred_errors, baseline_errors = testing_error(model, test, 200, 24, starting=12, offset=len(train))
+pred_errors, baseline_errors = testing_error(model, test, 200, 192, starting=74, offset=len(train))
 
 
